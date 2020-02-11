@@ -1,0 +1,5263 @@
+From c8d3ee9a90b2f9f17cc7539d222a649921c0590a Mon Sep 17 00:00:00 2001
+From: Saleh <saleh@grasppe.com>
+Date: Wed, 25 Apr 2018 07:37:24 -0400
+Subject: [PATCH 1/2] Support for experimental ".mjs" output (src)
+
+---
+ src/compiler/core.ts                          | 44 +++++++++---------
+ src/compiler/emitter.ts                       | 12 +++--
+ src/compiler/moduleNameResolver.ts            |  6 +--
+ src/compiler/program.ts                       |  7 +--
+ src/compiler/resolutionCache.ts               |  2 +-
+ src/compiler/types.ts                         |  1 +
+ src/harness/harness.ts                        | 45 ++++++++++++-------
+ src/harness/projectsRunner.ts                 | 15 +++++--
+ .../unittests/reuseProgramStructure.ts        | 16 +++++--
+ .../unittests/tsserverProjectSystem.ts        |  1 +
+ src/services/codefixes/importFixes.ts         | 10 ++---
+ 11 files changed, 99 insertions(+), 60 deletions(-)
+
+diff --git a/src/compiler/core.ts b/src/compiler/core.ts
+index f0220fb8c93..9f695eaf512 100644
+--- a/src/compiler/core.ts
++++ b/src/compiler/core.ts
+@@ -743,9 +743,9 @@ namespace ts {
+     export function deduplicate<T>(array: ReadonlyArray<T>, equalityComparer: EqualityComparer<T>, comparer?: Comparer<T>): T[] {
+         return !array ? undefined :
+             array.length === 0 ? [] :
+-            array.length === 1 ? array.slice() :
+-            comparer ? deduplicateRelational(array, equalityComparer, comparer) :
+-            deduplicateEquality(array, equalityComparer);
++                array.length === 1 ? array.slice() :
++                    comparer ? deduplicateRelational(array, equalityComparer, comparer) :
++                        deduplicateEquality(array, equalityComparer);
+     }
+ 
+     /**
+@@ -1008,15 +1008,17 @@ namespace ts {
+ 
+     export function arrayIterator<T>(array: ReadonlyArray<T>): Iterator<T> {
+         let i = 0;
+-        return { next: () => {
+-            if (i === array.length) {
+-                return { value: undefined as never, done: true };
+-            }
+-            else {
+-                i++;
+-                return { value: array[i - 1], done: false };
++        return {
++            next: () => {
++                if (i === array.length) {
++                    return { value: undefined as never, done: true };
++                }
++                else {
++                    i++;
++                    return { value: array[i - 1], done: false };
++                }
+             }
+-        }};
++        };
+     }
+ 
+     /**
+@@ -1710,9 +1712,9 @@ namespace ts {
+     function compareComparableValues(a: string | number, b: string | number) {
+         return a === b ? Comparison.EqualTo :
+             a === undefined ? Comparison.LessThan :
+-            b === undefined ? Comparison.GreaterThan :
+-            a < b ? Comparison.LessThan :
+-            Comparison.GreaterThan;
++                b === undefined ? Comparison.GreaterThan :
++                    a < b ? Comparison.LessThan :
++                        Comparison.GreaterThan;
+     }
+ 
+     /**
+@@ -1882,8 +1884,8 @@ namespace ts {
+     export function compareProperties<T, K extends keyof T>(a: T, b: T, key: K, comparer: Comparer<T[K]>) {
+         return a === b ? Comparison.EqualTo :
+             a === undefined ? Comparison.LessThan :
+-            b === undefined ? Comparison.GreaterThan :
+-            comparer(a[key], b[key]);
++                b === undefined ? Comparison.GreaterThan :
++                    comparer(a[key], b[key]);
+     }
+ 
+     function getDiagnosticFileName(diagnostic: Diagnostic): string {
+@@ -2036,7 +2038,7 @@ namespace ts {
+         return compilerOptions.target || ScriptTarget.ES3;
+     }
+ 
+-    export function getEmitModuleKind(compilerOptions: {module?: CompilerOptions["module"], target?: CompilerOptions["target"]}) {
++    export function getEmitModuleKind(compilerOptions: { module?: CompilerOptions["module"], target?: CompilerOptions["target"] }) {
+         return typeof compilerOptions.module === "number" ?
+             compilerOptions.module :
+             getEmitScriptTarget(compilerOptions) >= ScriptTarget.ES2015 ? ModuleKind.ES2015 : ModuleKind.CommonJS;
+@@ -2653,6 +2655,8 @@ namespace ts {
+     export function getScriptKindFromFileName(fileName: string): ScriptKind {
+         const ext = fileName.substr(fileName.lastIndexOf("."));
+         switch (ext.toLowerCase()) {
++            case Extension.Mjs:
++                return ScriptKind.JS;
+             case Extension.Js:
+                 return ScriptKind.JS;
+             case Extension.Jsx:
+@@ -2674,7 +2678,7 @@ namespace ts {
+     export const supportedTypeScriptExtensions: ReadonlyArray<Extension> = [Extension.Ts, Extension.Tsx, Extension.Dts];
+     /** Must have ".d.ts" first because if ".ts" goes first, that will be detected as the extension instead of ".d.ts". */
+     export const supportedTypescriptExtensionsForExtractExtension: ReadonlyArray<Extension> = [Extension.Dts, Extension.Ts, Extension.Tsx];
+-    export const supportedJavascriptExtensions: ReadonlyArray<Extension> = [Extension.Js, Extension.Jsx];
++    export const supportedJavascriptExtensions: ReadonlyArray<Extension> = [Extension.Mjs, Extension.Js, Extension.Jsx];
+     const allSupportedExtensions: ReadonlyArray<Extension> = [...supportedTypeScriptExtensions, ...supportedJavascriptExtensions];
+ 
+     export function getSupportedExtensions(options?: CompilerOptions, extraFileExtensions?: ReadonlyArray<JsFileExtensionInfo>): ReadonlyArray<string> {
+@@ -2760,7 +2764,7 @@ namespace ts {
+         }
+     }
+ 
+-    const extensionsToRemove = [Extension.Dts, Extension.Ts, Extension.Js, Extension.Tsx, Extension.Jsx];
++    const extensionsToRemove = [Extension.Dts, Extension.Ts, Extension.Mjs, Extension.Js, Extension.Tsx, Extension.Jsx];
+     export function removeFileExtension(path: string): string {
+         for (const ext of extensionsToRemove) {
+             const extensionless = tryRemoveExtension(path, ext);
+@@ -2822,7 +2826,7 @@ namespace ts {
+         }
+     }
+ 
+-    function Signature() {} // tslint:disable-line no-empty
++    function Signature() { } // tslint:disable-line no-empty
+ 
+     function Node(this: Node, kind: SyntaxKind, pos: number, end: number) {
+         this.pos = pos;
+diff --git a/src/compiler/emitter.ts b/src/compiler/emitter.ts
+index 2b01f2fdda1..bdb148542d0 100644
+--- a/src/compiler/emitter.ts
++++ b/src/compiler/emitter.ts
+@@ -77,7 +77,11 @@ namespace ts {
+                 return Extension.Jsx;
+             }
+         }
+-        return Extension.Js;
++        return options.target === ScriptTarget.ESNext
++            && options.module === ModuleKind.ESNext
++            && options.esModuleInterop
++            && options.allowSyntheticDefaultImports
++            && Extension.Mjs || Extension.Js;
+     }
+ 
+     /*@internal*/
+@@ -3236,10 +3240,10 @@ namespace ts {
+                     pushNameGenerationScope(/*node*/ undefined);
+                     tempFlags = savedTempFlags;
+                     return result;
+-                  }
+-                  else {
++                }
++                else {
+                     return generateNameCached(getNodeForGeneratedName(name));
+-                  }
++                }
+             }
+             else {
+                 // Auto, Loop, and Unique names are cached based on their unique
+diff --git a/src/compiler/moduleNameResolver.ts b/src/compiler/moduleNameResolver.ts
+index 81aed522490..c9fb3b8bf63 100644
+--- a/src/compiler/moduleNameResolver.ts
++++ b/src/compiler/moduleNameResolver.ts
+@@ -932,7 +932,7 @@ namespace ts {
+             case Extensions.TypeScript:
+                 return tryExtension(Extension.Ts) || tryExtension(Extension.Tsx) || tryExtension(Extension.Dts);
+             case Extensions.JavaScript:
+-                return tryExtension(Extension.Js) || tryExtension(Extension.Jsx);
++                return tryExtension(Extension.Mjs) || tryExtension(Extension.Js) || tryExtension(Extension.Jsx);
+         }
+ 
+         function tryExtension(ext: Extension): PathAndExtension | undefined {
+@@ -996,7 +996,7 @@ namespace ts {
+                 else {
+                     const jsPath = tryReadPackageJsonFields(/*readTypes*/ false, packageJsonContent, nodeModuleDirectory, state);
+                     if (typeof jsPath === "string") {
+-                        subModuleName = removeExtension(removeExtension(jsPath.substring(nodeModuleDirectory.length + 1), Extension.Js), Extension.Jsx) + Extension.Dts;
++                        subModuleName = removeExtension(removeExtension(removeExtension(jsPath.substring(nodeModuleDirectory.length + 1), Extension.Mjs), Extension.Js), Extension.Jsx) + Extension.Dts;
+                     }
+                     else {
+                         subModuleName = "index.d.ts";
+@@ -1068,7 +1068,7 @@ namespace ts {
+     function extensionIsOk(extensions: Extensions, extension: Extension): boolean {
+         switch (extensions) {
+             case Extensions.JavaScript:
+-                return extension === Extension.Js || extension === Extension.Jsx;
++                return extension === Extension.Mjs || extension === Extension.Js || extension === Extension.Jsx;
+             case Extensions.TypeScript:
+                 return extension === Extension.Ts || extension === Extension.Tsx || extension === Extension.Dts;
+             case Extensions.DtsOnly:
+diff --git a/src/compiler/program.ts b/src/compiler/program.ts
+index 75cdd07845f..11d4a6f39f7 100755
+--- a/src/compiler/program.ts
++++ b/src/compiler/program.ts
+@@ -328,14 +328,14 @@ namespace ts {
+ 
+                 output += formatColorAndReset(relativeFileName, ForegroundColorEscapeSequences.Cyan);
+                 output += ":";
+-                output += formatColorAndReset(`${ firstLine + 1 }`, ForegroundColorEscapeSequences.Yellow);
++                output += formatColorAndReset(`${firstLine + 1}`, ForegroundColorEscapeSequences.Yellow);
+                 output += ":";
+-                output += formatColorAndReset(`${ firstLineChar + 1 }`, ForegroundColorEscapeSequences.Yellow);
++                output += formatColorAndReset(`${firstLineChar + 1}`, ForegroundColorEscapeSequences.Yellow);
+                 output += " - ";
+             }
+ 
+             output += formatColorAndReset(diagnosticCategoryName(diagnostic), getCategoryFormat(diagnostic.category));
+-            output += formatColorAndReset(` TS${ diagnostic.code }: `, ForegroundColorEscapeSequences.Grey);
++            output += formatColorAndReset(` TS${diagnostic.code}: `, ForegroundColorEscapeSequences.Grey);
+             output += flattenDiagnosticMessageText(diagnostic.messageText, host.getNewLine());
+ 
+             if (diagnostic.file) {
+@@ -2428,6 +2428,7 @@ namespace ts {
+                 return needJsx();
+             case Extension.Jsx:
+                 return needJsx() || needAllowJs();
++            case Extension.Mjs:
+             case Extension.Js:
+                 return needAllowJs();
+         }
+diff --git a/src/compiler/resolutionCache.ts b/src/compiler/resolutionCache.ts
+index 35e056546c0..cfb43a8defa 100644
+--- a/src/compiler/resolutionCache.ts
++++ b/src/compiler/resolutionCache.ts
+@@ -103,7 +103,7 @@ namespace ts {
+          * This helps in not having to comb through all resolutions when files are added/removed
+          * Note that .d.ts file also has .d.ts extension hence will be part of default extensions
+          */
+-        const failedLookupDefaultExtensions = [Extension.Ts, Extension.Tsx, Extension.Js, Extension.Jsx, Extension.Json];
++        const failedLookupDefaultExtensions = [Extension.Ts, Extension.Tsx, Extension.Mjs, Extension.Js, Extension.Jsx, Extension.Json];
+         const customFailedLookupPaths = createMap<number>();
+ 
+         const directoryWatchesOfFailedLookups = createMap<DirectoryWatchesOfFailedLookup>();
+diff --git a/src/compiler/types.ts b/src/compiler/types.ts
+index 06f15e1d77a..f96a8e02ee4 100644
+--- a/src/compiler/types.ts
++++ b/src/compiler/types.ts
+@@ -4583,6 +4583,7 @@ namespace ts {
+         Ts = ".ts",
+         Tsx = ".tsx",
+         Dts = ".d.ts",
++        Mjs = ".mjs",
+         Js = ".js",
+         Jsx = ".jsx",
+         Json = ".json"
+diff --git a/src/harness/harness.ts b/src/harness/harness.ts
+index 9e6978f2a15..85650a0f096 100644
+--- a/src/harness/harness.ts
++++ b/src/harness/harness.ts
+@@ -159,7 +159,7 @@ namespace Utils {
+     export function memoize<T extends ts.AnyFunction>(f: T, memoKey: (...anything: any[]) => string): T {
+         const cache = ts.createMap<any>();
+ 
+-        return <any>(function(this: any, ...args: any[]) {
++        return <any>(function (this: any, ...args: any[]) {
+             const key = memoKey(...args);
+             if (cache.has(key)) {
+                 return cache.get(key);
+@@ -1343,7 +1343,7 @@ namespace Harness {
+         export function getErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean) {
+             let outputLines = "";
+             const gen = iterateErrorBaseline(inputFiles, diagnostics, pretty);
+-            for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++            for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                 const [, content] = value;
+                 outputLines += content;
+             }
+@@ -1352,7 +1352,7 @@ namespace Harness {
+ 
+         export const diagnosticSummaryMarker = "__diagnosticSummary";
+         export const globalErrorsMarker = "__globalErrors";
+-        export function *iterateErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean): IterableIterator<[string, string, number]> {
++        export function* iterateErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean): IterableIterator<[string, string, number]> {
+             diagnostics = ts.sort(diagnostics, ts.compareDiagnostics);
+             let outputLines = "";
+             // Count up all errors that were found in files other than lib.d.ts so we don't miss any
+@@ -1496,7 +1496,7 @@ namespace Harness {
+             });
+         }
+ 
+-        export function doTypeAndSymbolBaseline(baselinePath: string, program: ts.Program, allFiles: {unitName: string, content: string}[], opts?: Baseline.BaselineOptions, multifile?: boolean, skipTypeBaselines?: boolean, skipSymbolBaselines?: boolean) {
++        export function doTypeAndSymbolBaseline(baselinePath: string, program: ts.Program, allFiles: { unitName: string, content: string }[], opts?: Baseline.BaselineOptions, multifile?: boolean, skipTypeBaselines?: boolean, skipSymbolBaselines?: boolean) {
+             // The full walker simulates the types that you would get from doing a full
+             // compile.  The pull walker simulates the types you get when you just do
+             // a type query for a random node (like how the LS would do it).  Most of the
+@@ -1567,7 +1567,7 @@ namespace Harness {
+             function generateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): string {
+                 let result = "";
+                 const gen = iterateBaseLine(isSymbolBaseline, skipBaseline);
+-                for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++                for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                     const [, content] = value;
+                     result += content;
+                 }
+@@ -1576,7 +1576,7 @@ namespace Harness {
+                 /* tslint:enable:no-null-keyword */
+             }
+ 
+-            function *iterateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): IterableIterator<[string, string]> {
++            function* iterateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): IterableIterator<[string, string]> {
+                 if (skipBaseline) {
+                     return;
+                 }
+@@ -1588,7 +1588,7 @@ namespace Harness {
+                     const codeLines = ts.flatMap(file.content.split(/\r?\n/g), e => e.split(/[\r\u2028\u2029]/g));
+                     const gen: IterableIterator<TypeWriterResult> = isSymbolBaseline ? fullWalker.getSymbols(unitName) : fullWalker.getTypes(unitName);
+                     let lastIndexWritten: number | undefined;
+-                    for (let {done, value: result} = gen.next(); !done; { done, value: result } = gen.next()) {
++                    for (let { done, value: result } = gen.next(); !done; { done, value: result } = gen.next()) {
+                         if (isSymbolBaseline && !result.symbol) {
+                             return;
+                         }
+@@ -1644,7 +1644,14 @@ namespace Harness {
+                     throw new Error("Number of sourcemap files should be same as js files.");
+                 }
+ 
+-                Baseline.runBaseline(baselinePath.replace(/\.tsx?/, ".js.map"), () => {
++                const outExt = options.target === ts.ScriptTarget.ESNext
++                    && options.module === ts.ModuleKind.ESNext
++                    && options.esModuleInterop
++                    && options.allowSyntheticDefaultImports
++                    ? ts.Extension.Mjs : ts.Extension.Js;
++                const mapExt = `${outExt}.map`;
++
++                Baseline.runBaseline(baselinePath.replace(/\.tsx?/, mapExt), () => {
+                     if ((options.noEmitOnError && result.errors.length !== 0) || result.sourceMaps.length === 0) {
+                         // We need to return null here or the runBaseLine will actually create a empty file.
+                         // Baselining isn't required here because there is no output.
+@@ -1668,8 +1675,11 @@ namespace Harness {
+                 throw new Error("Expected at least one js file to be emitted or at least one error to be created.");
+             }
+ 
++            const outExt = options.target === ts.ScriptTarget.ESNext
++                ? ts.Extension.Mjs : ts.Extension.Js;
++
+             // check js output
+-            Baseline.runBaseline(baselinePath.replace(/\.tsx?/, ts.Extension.Js), () => {
++            Baseline.runBaseline(baselinePath.replace(/\.tsx?/, outExt), () => {
+                 let tsCode = "";
+                 const tsSources = otherFiles.concat(toBeCompiled);
+                 if (tsSources.length > 1) {
+@@ -1723,7 +1733,7 @@ namespace Harness {
+             const gen = iterateOutputs(outputFiles);
+             // Emit them
+             let result = "";
+-            for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++            for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                 // Some extra spacing if this isn't the first file
+                 if (result.length) {
+                     result += "\r\n\r\n";
+@@ -1735,7 +1745,7 @@ namespace Harness {
+             return result;
+         }
+ 
+-        export function *iterateOutputs(outputFiles: GeneratedFile[]): IterableIterator<[string, string]> {
++        export function* iterateOutputs(outputFiles: GeneratedFile[]): IterableIterator<[string, string]> {
+             // Collect, test, and sort the fileNames
+             outputFiles.sort((a, b) => ts.compareStringsCaseSensitive(cleanName(a.fileName), cleanName(b.fileName)));
+             const dupeCase = ts.createMap<number>();
+@@ -1797,14 +1807,17 @@ namespace Harness {
+         }
+ 
+         export function isJS(fileName: string) {
+-            return ts.endsWith(fileName, ts.Extension.Js);
++            return ts.endsWith(fileName, ts.Extension.Mjs)
++                || ts.endsWith(fileName, ts.Extension.Js);
+         }
+         export function isJSX(fileName: string) {
+             return ts.endsWith(fileName, ts.Extension.Jsx);
+         }
+ 
+         export function isJSMap(fileName: string) {
+-            return ts.endsWith(fileName, ".js.map") || ts.endsWith(fileName, ".jsx.map");
++            return ts.endsWith(fileName, ".mjs.map")
++                || ts.endsWith(fileName, ".js.map")
++                || ts.endsWith(fileName, ".jsx.map");
+         }
+ 
+         export function isDTSMap(fileName: string) {
+@@ -1874,7 +1887,7 @@ namespace Harness {
+             let match: RegExpExecArray;
+             /* tslint:disable:no-null-keyword */
+             while ((match = optionRegex.exec(content)) !== null) {
+-            /* tslint:enable:no-null-keyword */
++                /* tslint:enable:no-null-keyword */
+                 opts[match[1]] = match[2].trim();
+             }
+ 
+@@ -2056,7 +2069,7 @@ namespace Harness {
+ 
+             /* tslint:disable:no-null-keyword */
+             if (actual === null) {
+-            /* tslint:enable:no-null-keyword */
++                /* tslint:enable:no-null-keyword */
+                 actual = noContent;
+             }
+ 
+@@ -2119,7 +2132,7 @@ namespace Harness {
+             const errors: Error[] = [];
+             // tslint:disable-next-line:no-null-keyword
+             if (gen !== null) {
+-                for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++                for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                     const [name, content, count] = value as [string, string, number | undefined];
+                     if (count === 0) continue; // Allow error reporter to skip writing files without errors
+                     const relativeFileName = relativeFileBase + "/" + name + extension;
+diff --git a/src/harness/projectsRunner.ts b/src/harness/projectsRunner.ts
+index 7dbfe0c5a75..a187773f768 100644
+--- a/src/harness/projectsRunner.ts
++++ b/src/harness/projectsRunner.ts
+@@ -81,8 +81,8 @@ class ProjectRunner extends RunnerBase {
+             return moduleKind === ts.ModuleKind.AMD
+                 ? "amd"
+                 : moduleKind === ts.ModuleKind.CommonJS
+-                ? "node"
+-                : "none";
++                    ? "node"
++                    : "none";
+         }
+ 
+         // Project baselines verified go in project/testCaseName/moduleKind/
+@@ -312,6 +312,13 @@ class ProjectRunner extends RunnerBase {
+                     : Harness.IO.resolvePath(ts.normalizeSlashes(testCase.projectRoot) + "/" + ts.normalizeSlashes(fileName));
+ 
+                 const currentDirectory = getCurrentDirectory();
++                const outExt = compilerOptions.target === ts.ScriptTarget.ESNext
++                    && compilerOptions.module === ts.ModuleKind.ESNext
++                    && compilerOptions.esModuleInterop
++                    && compilerOptions.allowSyntheticDefaultImports
++                    ? ts.Extension.Mjs : ts.Extension.Js;
++                const mapExt = `${outExt}.map`;
++
+                 // compute file name relative to current directory (expanded project root)
+                 let diskRelativeName = ts.getRelativePathToDirectoryOrUrl(currentDirectory, diskFileName, currentDirectory, Harness.Compiler.getCanonicalFileName, /*isAbsolutePathAnUrl*/ false);
+                 if (ts.isRootedDiskPath(diskRelativeName) || diskRelativeName.substr(0, 3) === "../") {
+@@ -319,8 +326,8 @@ class ProjectRunner extends RunnerBase {
+                     // we need to instead create files that can live in the project reference folder
+                     // but make sure extension of these files matches with the fileName the compiler asked to write
+                     diskRelativeName = "diskFile" + nonSubfolderDiskFiles +
+-                    (Harness.Compiler.isDTS(fileName) ? ts.Extension.Dts :
+-                    Harness.Compiler.isJS(fileName) ? ts.Extension.Js : ".js.map");
++                        (Harness.Compiler.isDTS(fileName) ? ts.Extension.Dts :
++                            Harness.Compiler.isJS(fileName) ? outExt : mapExt);
+                     nonSubfolderDiskFiles++;
+                 }
+ 
+diff --git a/src/harness/unittests/reuseProgramStructure.ts b/src/harness/unittests/reuseProgramStructure.ts
+index 0ba9e6f6351..f1bf238575d 100644
+--- a/src/harness/unittests/reuseProgramStructure.ts
++++ b/src/harness/unittests/reuseProgramStructure.ts
+@@ -467,8 +467,10 @@ namespace ts {
+                         "File 'node_modules/@types/a/index.d.ts' does not exist.",
+                         "Loading module 'a' from 'node_modules' folder, target file type 'JavaScript'.",
+                         "File 'node_modules/a/package.json' does not exist.",
++                        "File 'node_modules/a.mjs' does not exist.",
+                         "File 'node_modules/a.js' does not exist.",
+                         "File 'node_modules/a.jsx' does not exist.",
++                        "File 'node_modules/a/index.mjs' does not exist.",
+                         "File 'node_modules/a/index.js' does not exist.",
+                         "File 'node_modules/a/index.jsx' does not exist.",
+                         "======== Module name 'a' was not resolved. ========"
+@@ -533,10 +535,13 @@ namespace ts {
+                     "File '/node_modules/@types/fs/package.json' does not exist.",
+                     "File '/node_modules/@types/fs.d.ts' does not exist.",
+                     "File '/node_modules/@types/fs/index.d.ts' does not exist.",
++                    "File '/a/b/fs.mjs' does not exist.",
+                     "File '/a/b/fs.js' does not exist.",
+                     "File '/a/b/fs.jsx' does not exist.",
++                    "File '/a/fs.mjs' does not exist.",
+                     "File '/a/fs.js' does not exist.",
+                     "File '/a/fs.jsx' does not exist.",
++                    "File '/fs.mjs' does not exist.",
+                     "File '/fs.js' does not exist.",
+                     "File '/fs.jsx' does not exist.",
+                     "======== Module name 'fs' was not resolved. ========",
+@@ -575,10 +580,13 @@ namespace ts {
+                     "File '/node_modules/@types/fs/package.json' does not exist.",
+                     "File '/node_modules/@types/fs.d.ts' does not exist.",
+                     "File '/node_modules/@types/fs/index.d.ts' does not exist.",
++                    "File '/a/b/fs.mjs' does not exist.",
+                     "File '/a/b/fs.js' does not exist.",
+                     "File '/a/b/fs.jsx' does not exist.",
++                    "File '/a/fs.mjs' does not exist.",
+                     "File '/a/fs.js' does not exist.",
+                     "File '/a/fs.jsx' does not exist.",
++                    "File '/fs.mjs' does not exist.",
+                     "File '/fs.js' does not exist.",
+                     "File '/fs.jsx' does not exist.",
+                     "======== Module name 'fs' was not resolved. ========",
+@@ -596,10 +604,10 @@ namespace ts {
+                 {
+                     name: "f1.ts",
+                     text:
+-                    SourceText.New(
+-                        `/// <reference path="a1.ts"/>${newLine}/// <reference types="typerefs1"/>${newLine}/// <reference no-default-lib="true"/>`,
+-                        `import { B } from './b1';${newLine}export let BB = B;`,
+-                        "declare module './b1' { interface B { y: string; } }")
++                        SourceText.New(
++                            `/// <reference path="a1.ts"/>${newLine}/// <reference types="typerefs1"/>${newLine}/// <reference no-default-lib="true"/>`,
++                            `import { B } from './b1';${newLine}export let BB = B;`,
++                            "declare module './b1' { interface B { y: string; } }")
+                 },
+                 {
+                     name: "f2.ts",
+diff --git a/src/harness/unittests/tsserverProjectSystem.ts b/src/harness/unittests/tsserverProjectSystem.ts
+index 1c0dd0beb5c..5b4743693ab 100644
+--- a/src/harness/unittests/tsserverProjectSystem.ts
++++ b/src/harness/unittests/tsserverProjectSystem.ts
+@@ -6115,6 +6115,7 @@ namespace ts.projectSystem {
+                 });
+                 forEachAncestorDirectory(getDirectoryPath(root.path), ancestor => {
+                     locations.push(
++                        combinePaths(ancestor, `${module}.mjs`),
+                         combinePaths(ancestor, `${module}.js`),
+                         combinePaths(ancestor, `${module}.jsx`)
+                     );
+diff --git a/src/services/codefixes/importFixes.ts b/src/services/codefixes/importFixes.ts
+index 26fa45d1e53..8d599247ced 100644
+--- a/src/services/codefixes/importFixes.ts
++++ b/src/services/codefixes/importFixes.ts
+@@ -213,7 +213,7 @@ namespace ts.codefix {
+     }
+ 
+     function usesJsExtensionOnImports(sourceFile: SourceFile): boolean {
+-        return firstDefined(sourceFile.imports, ({ text }) => pathIsRelative(text) ? fileExtensionIs(text, Extension.Js) : undefined) || false;
++        return firstDefined(sourceFile.imports, ({ text }) => pathIsRelative(text) ? fileExtensionIsOneOf(text, [Extension.Mjs, Extension.Js]) : undefined) || false;
+     }
+ 
+     function createImportClauseOfKind(kind: ImportKind.Default | ImportKind.Named | ImportKind.Namespace, symbolName: string) {
+@@ -729,10 +729,10 @@ namespace ts.codefix {
+             if (defaultExport) {
+                 const localSymbol = getLocalSymbolForExportDefault(defaultExport);
+                 if ((
+-                        localSymbol && localSymbol.escapedName === symbolName ||
+-                        getEscapedNameForExportDefault(defaultExport) === symbolName ||
+-                        moduleSymbolToValidIdentifier(moduleSymbol, program.getCompilerOptions().target) === symbolName
+-                    ) && checkSymbolHasMeaning(localSymbol || defaultExport, currentTokenMeaning)) {
++                    localSymbol && localSymbol.escapedName === symbolName ||
++                    getEscapedNameForExportDefault(defaultExport) === symbolName ||
++                    moduleSymbolToValidIdentifier(moduleSymbol, program.getCompilerOptions().target) === symbolName
++                ) && checkSymbolHasMeaning(localSymbol || defaultExport, currentTokenMeaning)) {
+                     addSymbol(moduleSymbol, localSymbol || defaultExport, ImportKind.Default);
+                 }
+             }
+
+From 3371fccd19538ed13838b8345e4b51a518eab64f Mon Sep 17 00:00:00 2001
+From: Saleh <saleh@grasppe.com>
+Date: Wed, 25 Apr 2018 07:37:47 -0400
+Subject: [PATCH 2/2] Support for experimental ".mjs" output (tests/baselines)
+
+---
+ .../reference/api/tsserverlibrary.d.ts        |   1 +
+ tests/baselines/reference/api/typescript.d.ts |   1 +
+ .../awaitExpressionInnerCommentEmit.mjs       |  13 +
+ .../reference/cacheResolutions.trace.json     |   4 +
+ .../cachedModuleResolution8.trace.json        |   6 +
+ .../cachedModuleResolution9.trace.json        |   4 +
+ tests/baselines/reference/dynamicNames.mjs    | 250 ++++++++
+ .../reference/dynamicNamesErrors.mjs          | 121 ++++
+ ...er.asyncGenerators.classMethods.esnext.mjs | 120 ++++
+ ...Generators.functionDeclarations.esnext.mjs |  58 ++
+ ...cGenerators.functionExpressions.esnext.mjs |  58 ++
+ ...Generators.objectLiteralMethods.esnext.mjs |  86 +++
+ .../reference/emitter.forAwait.esnext.mjs     |  83 +++
+ .../emitter.noCatchBinding.esnext.mjs         |  22 +
+ .../baselines/reference/forAwaitForUnion.mjs  |  11 +
+ .../reference/generatorNoImplicitReturns.mjs  |  17 +
+ .../generatorReturnExpressionIsChecked.mjs    |  10 +
+ .../reference/importCallExpression1ESNext.mjs |  30 +
+ .../reference/importCallExpression2ESNext.mjs |  29 +
+ .../reference/importCallExpression3ESNext.mjs |  27 +
+ .../reference/importCallExpression4ESNext.mjs |  51 ++
+ .../reference/importCallExpression5ESNext.mjs |  33 ++
+ .../reference/importCallExpression6ESNext.mjs |  33 ++
+ .../importCallExpressionAsyncESNext.mjs       |  56 ++
+ .../importCallExpressionDeclarationEmit2.mjs  |  16 +
+ .../importCallExpressionDeclarationEmit3.mjs  |  31 +
+ .../importCallExpressionErrorInES2015.mjs     |  27 +
+ .../reference/importCallExpressionInAMD1.mjs  |  39 ++
+ .../reference/importCallExpressionInAMD2.mjs  |  39 ++
+ .../reference/importCallExpressionInAMD3.mjs  |  35 ++
+ .../reference/importCallExpressionInAMD4.mjs  |  96 ++++
+ .../reference/importCallExpressionInCJS1.mjs  |  35 ++
+ .../reference/importCallExpressionInCJS2.mjs  |  40 ++
+ .../reference/importCallExpressionInCJS3.mjs  |  34 ++
+ .../reference/importCallExpressionInCJS4.mjs  |  30 +
+ .../reference/importCallExpressionInCJS5.mjs  |  90 +++
+ .../importCallExpressionInExportEqualsAMD.mjs |  22 +
+ .../importCallExpressionInExportEqualsCJS.mjs |  18 +
+ .../importCallExpressionInExportEqualsUMD.mjs |  39 ++
+ .../importCallExpressionInSystem1.mjs         |  50 ++
+ .../importCallExpressionInSystem2.mjs         |  50 ++
+ .../importCallExpressionInSystem3.mjs         |  46 ++
+ .../importCallExpressionInSystem4.mjs         | 113 ++++
+ .../reference/importCallExpressionInUMD1.mjs  |  56 ++
+ .../reference/importCallExpressionInUMD2.mjs  |  56 ++
+ .../reference/importCallExpressionInUMD3.mjs  |  52 ++
+ .../reference/importCallExpressionInUMD4.mjs  | 121 ++++
+ .../importCallExpressionIncorrect1.mjs        |  13 +
+ .../importCallExpressionIncorrect2.mjs        |  12 +
+ .../importExportInternalComments.mjs          |  25 +
+ ...sFileCompilationWithMapFileAsJs.errors.txt |   4 +-
+ ...hMapFileAsJsWithInlineSourceMap.errors.txt |   4 +-
+ ...NodeModuleJsDepthDefaultsToZero.trace.json |   2 +
+ ...tionWithExtensions_notSupported.trace.json |   2 +
+ ...ionWithExtensions_notSupported2.trace.json |   1 +
+ ...ionWithExtensions_notSupported3.trace.json |   1 +
+ ...lutionWithExtensions_unexpected.trace.json |   3 +
+ ...utionWithExtensions_unexpected2.trace.json |   2 +
+ ...thExtensions_withAmbientPresent.trace.json |   2 +
+ ...on_packageJson_yesAtPackageRoot.trace.json |   2 +
+ ...AtPackageRoot_fakeScopedPackage.trace.json |   2 +
+ .../objectLiteralPropertyImplicitlyAny.mjs    |   8 +
+ .../reference/objectSpreadNoTransform.mjs     |  14 +
+ .../reference/packageJsonMain.trace.json      |   6 +
+ .../packageJsonMain_isNonRecursive.trace.json |   4 +
+ .../parserArrowFunctionExpression7.mjs        |  16 +
+ .../potentiallyUncalledDecorators.mjs         | 189 ++++++
+ .../taggedTemplatesWithTypeArguments1.mjs     |  72 +++
+ .../taggedTemplatesWithTypeArguments2.mjs     |  61 ++
+ ...mMultipleNodeModulesDirectories.trace.json |   6 +
+ ...romNodeModulesInParentDirectory.trace.json |   1 +
+ tests/baselines/reference/uniqueSymbols.mjs   | 450 +++++++++++++++
+ .../reference/uniqueSymbolsDeclarations.mjs   | 540 ++++++++++++++++++
+ .../uniqueSymbolsDeclarationsErrors.mjs       | 100 ++++
+ .../reference/uniqueSymbolsErrors.mjs         | 115 ++++
+ 75 files changed, 3912 insertions(+), 4 deletions(-)
+ create mode 100644 tests/baselines/reference/awaitExpressionInnerCommentEmit.mjs
+ create mode 100644 tests/baselines/reference/dynamicNames.mjs
+ create mode 100644 tests/baselines/reference/dynamicNamesErrors.mjs
+ create mode 100644 tests/baselines/reference/emitter.asyncGenerators.classMethods.esnext.mjs
+ create mode 100644 tests/baselines/reference/emitter.asyncGenerators.functionDeclarations.esnext.mjs
+ create mode 100644 tests/baselines/reference/emitter.asyncGenerators.functionExpressions.esnext.mjs
+ create mode 100644 tests/baselines/reference/emitter.asyncGenerators.objectLiteralMethods.esnext.mjs
+ create mode 100644 tests/baselines/reference/emitter.forAwait.esnext.mjs
+ create mode 100644 tests/baselines/reference/emitter.noCatchBinding.esnext.mjs
+ create mode 100644 tests/baselines/reference/forAwaitForUnion.mjs
+ create mode 100644 tests/baselines/reference/generatorNoImplicitReturns.mjs
+ create mode 100644 tests/baselines/reference/generatorReturnExpressionIsChecked.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression1ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression2ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression3ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression4ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression5ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpression6ESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionAsyncESNext.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionDeclarationEmit2.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionDeclarationEmit3.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionErrorInES2015.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInAMD1.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInAMD2.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInAMD3.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInAMD4.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInCJS1.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInCJS2.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInCJS3.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInCJS4.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInCJS5.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInExportEqualsAMD.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInExportEqualsCJS.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInExportEqualsUMD.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInSystem1.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInSystem2.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInSystem3.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInSystem4.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInUMD1.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInUMD2.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInUMD3.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionInUMD4.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionIncorrect1.mjs
+ create mode 100644 tests/baselines/reference/importCallExpressionIncorrect2.mjs
+ create mode 100644 tests/baselines/reference/importExportInternalComments.mjs
+ create mode 100644 tests/baselines/reference/objectLiteralPropertyImplicitlyAny.mjs
+ create mode 100644 tests/baselines/reference/objectSpreadNoTransform.mjs
+ create mode 100644 tests/baselines/reference/parserArrowFunctionExpression7.mjs
+ create mode 100644 tests/baselines/reference/potentiallyUncalledDecorators.mjs
+ create mode 100644 tests/baselines/reference/taggedTemplatesWithTypeArguments1.mjs
+ create mode 100644 tests/baselines/reference/taggedTemplatesWithTypeArguments2.mjs
+ create mode 100644 tests/baselines/reference/uniqueSymbols.mjs
+ create mode 100644 tests/baselines/reference/uniqueSymbolsDeclarations.mjs
+ create mode 100644 tests/baselines/reference/uniqueSymbolsDeclarationsErrors.mjs
+ create mode 100644 tests/baselines/reference/uniqueSymbolsErrors.mjs
+
+diff --git a/tests/baselines/reference/api/tsserverlibrary.d.ts b/tests/baselines/reference/api/tsserverlibrary.d.ts
+index 1f5757ff4ce..b57f0c66510 100644
+--- a/tests/baselines/reference/api/tsserverlibrary.d.ts
++++ b/tests/baselines/reference/api/tsserverlibrary.d.ts
+@@ -2526,6 +2526,7 @@ declare namespace ts {
+         Ts = ".ts",
+         Tsx = ".tsx",
+         Dts = ".d.ts",
++        Mjs = ".mjs",
+         Js = ".js",
+         Jsx = ".jsx",
+         Json = ".json"
+diff --git a/tests/baselines/reference/api/typescript.d.ts b/tests/baselines/reference/api/typescript.d.ts
+index 3c47002061f..80ee532a54a 100644
+--- a/tests/baselines/reference/api/typescript.d.ts
++++ b/tests/baselines/reference/api/typescript.d.ts
+@@ -2526,6 +2526,7 @@ declare namespace ts {
+         Ts = ".ts",
+         Tsx = ".tsx",
+         Dts = ".d.ts",
++        Mjs = ".mjs",
+         Js = ".js",
+         Jsx = ".jsx",
+         Json = ".json"
+diff --git a/tests/baselines/reference/awaitExpressionInnerCommentEmit.mjs b/tests/baselines/reference/awaitExpressionInnerCommentEmit.mjs
+new file mode 100644
+index 00000000000..4cc1ccad8b5
+--- /dev/null
++++ b/tests/baselines/reference/awaitExpressionInnerCommentEmit.mjs
+@@ -0,0 +1,13 @@
++//// [awaitExpressionInnerCommentEmit.ts]
++async function foo() {
++    /*comment1*/ await 1;
++    await /*comment2*/ 2;
++    await 3 /*comment3*/
++}
++
++//// [awaitExpressionInnerCommentEmit.js]
++async function foo() {
++    /*comment1*/ await 1;
++    await /*comment2*/ 2;
++    await 3; /*comment3*/
++}
+diff --git a/tests/baselines/reference/cacheResolutions.trace.json b/tests/baselines/reference/cacheResolutions.trace.json
+index e23322299e6..42bf151a5b5 100644
+--- a/tests/baselines/reference/cacheResolutions.trace.json
++++ b/tests/baselines/reference/cacheResolutions.trace.json
+@@ -17,12 +17,16 @@
+     "Directory '/a/b/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/a/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/node_modules' does not exist, skipping all lookups in it.",
++    "File '/a/b/c/tslib.mjs' does not exist.",
+     "File '/a/b/c/tslib.js' does not exist.",
+     "File '/a/b/c/tslib.jsx' does not exist.",
++    "File '/a/b/tslib.mjs' does not exist.",
+     "File '/a/b/tslib.js' does not exist.",
+     "File '/a/b/tslib.jsx' does not exist.",
++    "File '/a/tslib.mjs' does not exist.",
+     "File '/a/tslib.js' does not exist.",
+     "File '/a/tslib.jsx' does not exist.",
++    "File '/tslib.mjs' does not exist.",
+     "File '/tslib.js' does not exist.",
+     "File '/tslib.jsx' does not exist.",
+     "======== Module name 'tslib' was not resolved. ========",
+diff --git a/tests/baselines/reference/cachedModuleResolution8.trace.json b/tests/baselines/reference/cachedModuleResolution8.trace.json
+index 9b7c37c8568..298f0259983 100644
+--- a/tests/baselines/reference/cachedModuleResolution8.trace.json
++++ b/tests/baselines/reference/cachedModuleResolution8.trace.json
+@@ -25,16 +25,22 @@
+     "Directory '/a/b/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/a/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/node_modules' does not exist, skipping all lookups in it.",
++    "File '/a/b/c/d/e/foo.mjs' does not exist.",
+     "File '/a/b/c/d/e/foo.js' does not exist.",
+     "File '/a/b/c/d/e/foo.jsx' does not exist.",
++    "File '/a/b/c/d/foo.mjs' does not exist.",
+     "File '/a/b/c/d/foo.js' does not exist.",
+     "File '/a/b/c/d/foo.jsx' does not exist.",
++    "File '/a/b/c/foo.mjs' does not exist.",
+     "File '/a/b/c/foo.js' does not exist.",
+     "File '/a/b/c/foo.jsx' does not exist.",
++    "File '/a/b/foo.mjs' does not exist.",
+     "File '/a/b/foo.js' does not exist.",
+     "File '/a/b/foo.jsx' does not exist.",
++    "File '/a/foo.mjs' does not exist.",
+     "File '/a/foo.js' does not exist.",
+     "File '/a/foo.jsx' does not exist.",
++    "File '/foo.mjs' does not exist.",
+     "File '/foo.js' does not exist.",
+     "File '/foo.jsx' does not exist.",
+     "======== Module name 'foo' was not resolved. ========",
+diff --git a/tests/baselines/reference/cachedModuleResolution9.trace.json b/tests/baselines/reference/cachedModuleResolution9.trace.json
+index b07e32abf5e..a15fe793903 100644
+--- a/tests/baselines/reference/cachedModuleResolution9.trace.json
++++ b/tests/baselines/reference/cachedModuleResolution9.trace.json
+@@ -17,12 +17,16 @@
+     "Directory '/a/b/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/a/node_modules' does not exist, skipping all lookups in it.",
+     "Directory '/node_modules' does not exist, skipping all lookups in it.",
++    "File '/a/b/c/foo.mjs' does not exist.",
+     "File '/a/b/c/foo.js' does not exist.",
+     "File '/a/b/c/foo.jsx' does not exist.",
++    "File '/a/b/foo.mjs' does not exist.",
+     "File '/a/b/foo.js' does not exist.",
+     "File '/a/b/foo.jsx' does not exist.",
++    "File '/a/foo.mjs' does not exist.",
+     "File '/a/foo.js' does not exist.",
+     "File '/a/foo.jsx' does not exist.",
++    "File '/foo.mjs' does not exist.",
+     "File '/foo.js' does not exist.",
+     "File '/foo.jsx' does not exist.",
+     "======== Module name 'foo' was not resolved. ========",
+diff --git a/tests/baselines/reference/dynamicNames.mjs b/tests/baselines/reference/dynamicNames.mjs
+new file mode 100644
+index 00000000000..89a5076fc36
+--- /dev/null
++++ b/tests/baselines/reference/dynamicNames.mjs
+@@ -0,0 +1,250 @@
++//// [tests/cases/compiler/dynamicNames.ts] ////
++
++//// [module.ts]
++export const c0 = "a";
++export const c1 = 1;
++export const s0 = Symbol();
++export interface T0 {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++}
++export declare class T1 implements T2 {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++}
++export declare class T2 extends T1 {
++}
++export declare type T3 = {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++};
++
++//// [main.ts]
++import { c0, c1, s0, T0, T1, T2, T3 } from "./module";
++import * as M from "./module";
++
++namespace N {
++    export const c2 = "a";
++    export const c3 = 1;
++    export const s1: typeof s0 = s0;
++
++    export interface T4 {
++        [N.c2]: number;
++        [N.c3]: string;
++        [N.s1]: boolean;
++    }
++    export declare class T5 implements T4 {
++        [N.c2]: number;
++        [N.c3]: string;
++        [N.s1]: boolean;
++    }
++    export declare class T6 extends T5 {
++    }
++    export declare type T7 = {
++        [N.c2]: number;
++        [N.c3]: string;
++        [N.s1]: boolean;
++    };
++}
++
++export const c4 = "a";
++export const c5 = 1;
++export const s2: typeof s0 = s0;
++
++interface T8 {
++    [c4]: number;
++    [c5]: string;
++    [s2]: boolean;
++}
++declare class T9 implements T8 {
++    [c4]: number;
++    [c5]: string;
++    [s2]: boolean;
++}
++declare class T10 extends T9 {
++}
++declare type T11 = {
++    [c4]: number;
++    [c5]: string;
++    [s2]: boolean;
++};
++
++interface T12 {
++    a: number;
++    1: string;
++    [s2]: boolean;
++}
++declare class T13 implements T2 {
++    a: number;
++    1: string;
++    [s2]: boolean;
++}
++declare class T14 extends T13 {
++}
++declare type T15 = {
++    a: number;
++    1: string;
++    [s2]: boolean;
++};
++
++declare class C {
++    static a: number;
++    static 1: string;
++    static [s2]: boolean;
++}
++
++let t0: T0;
++let t1: T1;
++let t2: T2;
++let t3: T3;
++let t0_1: M.T0;
++let t1_1: M.T1;
++let t2_1: M.T2;
++let t3_1: M.T3;
++let t4: N.T4;
++let t5: N.T5;
++let t6: N.T6;
++let t7: N.T7;
++let t8: T8;
++let t9: T9;
++let t10: T10;
++let t11: T11;
++let t12: T12;
++let t13: T13;
++let t14: T14;
++let t15: T15;
++
++// assignability
++t0 = t1, t0 = t2, t0 = t3, t1 = t0, t1 = t2, t1 = t3, t2 = t0, t2 = t1, t2 = t3, t3 = t0, t3 = t1, t3 = t2;
++t4 = t5, t4 = t6, t4 = t7, t5 = t4, t5 = t6, t5 = t7, t6 = t4, t6 = t5, t6 = t7, t7 = t4, t7 = t5, t7 = t6;
++t0 = t12, t0 = t13, t0 = t14, t0 = t15, t12 = t0, t13 = t0, t14 = t0, t15 = t0;
++t0 = C; // static side
++
++// object literals
++export const o1 = {
++    [c4]: 1,
++    [c5]: "a",
++    [s2]: true
++};
++
++// check element access types
++export const o1_c4 = o1[c4];
++export const o1_c5 = o1[c5];
++export const o1_s2 = o1[s2];
++
++export const o2: T0 = o1;
++
++// recursive declarations
++// (type parameter indirection courtesy of #20400)
++declare const rI: RI<"a">;
++rI.x
++interface RI<T extends "a" | "b"> {
++    x: T;
++    [rI.x]: "b";
++}
++
++declare const rC: RC<"a">;
++rC.x
++declare class RC<T extends "a" | "b"> {
++    x: T;
++    [rC.x]: "b";
++}
++
++
++//// [module.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++exports.c0 = "a";
++exports.c1 = 1;
++exports.s0 = Symbol();
++//// [main.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++const module_1 = require("./module");
++var N;
++(function (N) {
++    N.c2 = "a";
++    N.c3 = 1;
++    N.s1 = module_1.s0;
++})(N || (N = {}));
++exports.c4 = "a";
++exports.c5 = 1;
++exports.s2 = module_1.s0;
++let t0;
++let t1;
++let t2;
++let t3;
++let t0_1;
++let t1_1;
++let t2_1;
++let t3_1;
++let t4;
++let t5;
++let t6;
++let t7;
++let t8;
++let t9;
++let t10;
++let t11;
++let t12;
++let t13;
++let t14;
++let t15;
++// assignability
++t0 = t1, t0 = t2, t0 = t3, t1 = t0, t1 = t2, t1 = t3, t2 = t0, t2 = t1, t2 = t3, t3 = t0, t3 = t1, t3 = t2;
++t4 = t5, t4 = t6, t4 = t7, t5 = t4, t5 = t6, t5 = t7, t6 = t4, t6 = t5, t6 = t7, t7 = t4, t7 = t5, t7 = t6;
++t0 = t12, t0 = t13, t0 = t14, t0 = t15, t12 = t0, t13 = t0, t14 = t0, t15 = t0;
++t0 = C; // static side
++// object literals
++exports.o1 = {
++    [exports.c4]: 1,
++    [exports.c5]: "a",
++    [exports.s2]: true
++};
++// check element access types
++exports.o1_c4 = exports.o1[exports.c4];
++exports.o1_c5 = exports.o1[exports.c5];
++exports.o1_s2 = exports.o1[exports.s2];
++exports.o2 = exports.o1;
++rI.x;
++rC.x;
++
++
++//// [module.d.ts]
++export declare const c0 = "a";
++export declare const c1 = 1;
++export declare const s0: unique symbol;
++export interface T0 {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++}
++export declare class T1 implements T2 {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++}
++export declare class T2 extends T1 {
++}
++export declare type T3 = {
++    [c0]: number;
++    [c1]: string;
++    [s0]: boolean;
++};
++//// [main.d.ts]
++import { s0, T0 } from "./module";
++export declare const c4 = "a";
++export declare const c5 = 1;
++export declare const s2: typeof s0;
++export declare const o1: {
++    [c4]: number;
++    [c5]: string;
++    [s2]: boolean;
++};
++export declare const o1_c4: number;
++export declare const o1_c5: string;
++export declare const o1_s2: boolean;
++export declare const o2: T0;
+diff --git a/tests/baselines/reference/dynamicNamesErrors.mjs b/tests/baselines/reference/dynamicNamesErrors.mjs
+new file mode 100644
+index 00000000000..ff6bdec604f
+--- /dev/null
++++ b/tests/baselines/reference/dynamicNamesErrors.mjs
+@@ -0,0 +1,121 @@
++//// [dynamicNamesErrors.ts]
++const c0 = "1";
++const c1 = 1;
++
++interface T0 {
++    [c0]: number;
++    1: number;
++}
++
++interface T1 {
++    [c0]: number;
++}
++
++interface T2 {
++    [c0]: string;
++}
++
++interface T3 {
++    [c0]: number;
++    [c1]: string;
++}
++
++let t1: T1;
++let t2: T2;
++t1 = t2;
++t2 = t1;
++
++const x = Symbol();
++const y = Symbol();
++const z = Symbol();
++const w = Symbol();
++
++export interface InterfaceMemberVisibility {
++    [x]: number;
++    [y](): number;
++}
++
++export class ClassMemberVisibility {
++    static [x]: number;
++    static [y](): number { return 0; }
++    static get [z](): number { return 0; }
++    static set [w](value: number) { }
++
++    [x]: number;
++    [y](): number { return 0; }
++    get [z](): number { return 0; }
++    set [w](value: number) { }
++}
++
++export type ObjectTypeVisibility = {
++    [x]: number;
++    [y](): number;
++};
++
++export const ObjectLiteralVisibility = {
++    [x]: 0,
++    [y](): number { return 0; },
++    get [z](): number { return 0; },
++    set [w](value: number) { },
++};
++
++//// [dynamicNamesErrors.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++const c0 = "1";
++const c1 = 1;
++let t1;
++let t2;
++t1 = t2;
++t2 = t1;
++const x = Symbol();
++const y = Symbol();
++const z = Symbol();
++const w = Symbol();
++class ClassMemberVisibility {
++    static [y]() { return 0; }
++    static get [z]() { return 0; }
++    static set [w](value) { }
++    [y]() { return 0; }
++    get [z]() { return 0; }
++    set [w](value) { }
++}
++exports.ClassMemberVisibility = ClassMemberVisibility;
++exports.ObjectLiteralVisibility = {
++    [x]: 0,
++    [y]() { return 0; },
++    get [z]() { return 0; },
++    set [w](value) { },
++};
++
++
++//// [dynamicNamesErrors.d.ts]
++declare const x: unique symbol;
++declare const y: unique symbol;
++declare const z: unique symbol;
++declare const w: unique symbol;
++export interface InterfaceMemberVisibility {
++    [x]: number;
++    [y](): number;
++}
++export declare class ClassMemberVisibility {
++    static [x]: number;
++    static [y](): number;
++    static readonly [z]: number;
++    static [w]: number;
++    [x]: number;
++    [y](): number;
++    readonly [z]: number;
++    [w]: number;
++}
++export declare type ObjectTypeVisibility = {
++    [x]: number;
++    [y](): number;
++};
++export declare const ObjectLiteralVisibility: {
++    [x]: number;
++    [y](): number;
++    readonly [z]: number;
++    [w]: number;
++};
++export {};
+diff --git a/tests/baselines/reference/emitter.asyncGenerators.classMethods.esnext.mjs b/tests/baselines/reference/emitter.asyncGenerators.classMethods.esnext.mjs
+new file mode 100644
+index 00000000000..84c8aaf009b
+--- /dev/null
++++ b/tests/baselines/reference/emitter.asyncGenerators.classMethods.esnext.mjs
+@@ -0,0 +1,120 @@
++//// [tests/cases/conformance/emitter/esnext/asyncGenerators/emitter.asyncGenerators.classMethods.esnext.ts] ////
++
++//// [C1.ts]
++class C1 {
++    async * f() {
++    }
++}
++//// [C2.ts]
++class C2 {
++    async * f() {
++        const x = yield;
++    }
++}
++//// [C3.ts]
++class C3 {
++    async * f() {
++        const x = yield 1;
++    }
++}
++//// [C4.ts]
++class C4 {
++    async * f() {
++        const x = yield* [1];
++    }
++}
++//// [C5.ts]
++class C5 {
++    async * f() {
++        const x = yield* (async function*() { yield 1; })();
++    }
++}
++//// [C6.ts]
++class C6 {
++    async * f() {
++        const x = await 1;
++    }
++}
++//// [C7.ts]
++class C7 {
++    async * f() {
++        return 1;
++    }
++}
++//// [C8.ts]
++class C8 {
++    g() {
++    }
++    async * f() {
++        this.g();
++    }
++}
++//// [C9.ts]
++class B9 {
++    g() {}
++}
++class C9 extends B9 {
++    async * f() {
++        super.g();
++    }
++}
++
++
++//// [C1.js]
++class C1 {
++    async *f() {
++    }
++}
++//// [C2.js]
++class C2 {
++    async *f() {
++        const x = yield;
++    }
++}
++//// [C3.js]
++class C3 {
++    async *f() {
++        const x = yield 1;
++    }
++}
++//// [C4.js]
++class C4 {
++    async *f() {
++        const x = yield* [1];
++    }
++}
++//// [C5.js]
++class C5 {
++    async *f() {
++        const x = yield* (async function* () { yield 1; })();
++    }
++}
++//// [C6.js]
++class C6 {
++    async *f() {
++        const x = await 1;
++    }
++}
++//// [C7.js]
++class C7 {
++    async *f() {
++        return 1;
++    }
++}
++//// [C8.js]
++class C8 {
++    g() {
++    }
++    async *f() {
++        this.g();
++    }
++}
++//// [C9.js]
++class B9 {
++    g() { }
++}
++class C9 extends B9 {
++    async *f() {
++        super.g();
++    }
++}
+diff --git a/tests/baselines/reference/emitter.asyncGenerators.functionDeclarations.esnext.mjs b/tests/baselines/reference/emitter.asyncGenerators.functionDeclarations.esnext.mjs
+new file mode 100644
+index 00000000000..57708e027a3
+--- /dev/null
++++ b/tests/baselines/reference/emitter.asyncGenerators.functionDeclarations.esnext.mjs
+@@ -0,0 +1,58 @@
++//// [tests/cases/conformance/emitter/esnext/asyncGenerators/emitter.asyncGenerators.functionDeclarations.esnext.ts] ////
++
++//// [F1.ts]
++async function * f1() {
++}
++//// [F2.ts]
++async function * f2() {
++    const x = yield;
++}
++//// [F3.ts]
++async function * f3() {
++    const x = yield 1;
++}
++//// [F4.ts]
++async function * f4() {
++    const x = yield* [1];
++}
++//// [F5.ts]
++async function * f5() {
++    const x = yield* (async function*() { yield 1; })();
++}
++//// [F6.ts]
++async function * f6() {
++    const x = await 1;
++}
++//// [F7.ts]
++async function * f7() {
++    return 1;
++}
++
++
++//// [F1.js]
++async function* f1() {
++}
++//// [F2.js]
++async function* f2() {
++    const x = yield;
++}
++//// [F3.js]
++async function* f3() {
++    const x = yield 1;
++}
++//// [F4.js]
++async function* f4() {
++    const x = yield* [1];
++}
++//// [F5.js]
++async function* f5() {
++    const x = yield* (async function* () { yield 1; })();
++}
++//// [F6.js]
++async function* f6() {
++    const x = await 1;
++}
++//// [F7.js]
++async function* f7() {
++    return 1;
++}
+diff --git a/tests/baselines/reference/emitter.asyncGenerators.functionExpressions.esnext.mjs b/tests/baselines/reference/emitter.asyncGenerators.functionExpressions.esnext.mjs
+new file mode 100644
+index 00000000000..349fea53b7a
+--- /dev/null
++++ b/tests/baselines/reference/emitter.asyncGenerators.functionExpressions.esnext.mjs
+@@ -0,0 +1,58 @@
++//// [tests/cases/conformance/emitter/esnext/asyncGenerators/emitter.asyncGenerators.functionExpressions.esnext.ts] ////
++
++//// [F1.ts]
++const f1 = async function * () {
++}
++//// [F2.ts]
++const f2 = async function * () {
++    const x = yield;
++}
++//// [F3.ts]
++const f3 = async function * () {
++    const x = yield 1;
++}
++//// [F4.ts]
++const f4 = async function * () {
++    const x = yield* [1];
++}
++//// [F5.ts]
++const f5 = async function * () {
++    const x = yield* (async function*() { yield 1; })();
++}
++//// [F6.ts]
++const f6 = async function * () {
++    const x = await 1;
++}
++//// [F7.ts]
++const f7 = async function * () {
++    return 1;
++}
++
++
++//// [F1.js]
++const f1 = async function* () {
++};
++//// [F2.js]
++const f2 = async function* () {
++    const x = yield;
++};
++//// [F3.js]
++const f3 = async function* () {
++    const x = yield 1;
++};
++//// [F4.js]
++const f4 = async function* () {
++    const x = yield* [1];
++};
++//// [F5.js]
++const f5 = async function* () {
++    const x = yield* (async function* () { yield 1; })();
++};
++//// [F6.js]
++const f6 = async function* () {
++    const x = await 1;
++};
++//// [F7.js]
++const f7 = async function* () {
++    return 1;
++};
+diff --git a/tests/baselines/reference/emitter.asyncGenerators.objectLiteralMethods.esnext.mjs b/tests/baselines/reference/emitter.asyncGenerators.objectLiteralMethods.esnext.mjs
+new file mode 100644
+index 00000000000..a1877b38184
+--- /dev/null
++++ b/tests/baselines/reference/emitter.asyncGenerators.objectLiteralMethods.esnext.mjs
+@@ -0,0 +1,86 @@
++//// [tests/cases/conformance/emitter/esnext/asyncGenerators/emitter.asyncGenerators.objectLiteralMethods.esnext.ts] ////
++
++//// [O1.ts]
++const o1 = {
++    async * f() {
++    }
++}
++//// [O2.ts]
++const o2 = {
++    async * f() {
++        const x = yield;
++    }
++}
++//// [O3.ts]
++const o3 = {
++    async * f() {
++        const x = yield 1;
++    }
++}
++//// [O4.ts]
++const o4 = {
++    async * f() {
++        const x = yield* [1];
++    }
++}
++//// [O5.ts]
++const o5 = {
++    async * f() {
++        const x = yield* (async function*() { yield 1; })();
++    }
++}
++//// [O6.ts]
++const o6 = {
++    async * f() {
++        const x = await 1;
++    }
++}
++//// [O7.ts]
++const o7 = {
++    async * f() {
++        return 1;
++    }
++}
++
++
++//// [O1.js]
++const o1 = {
++    async *f() {
++    }
++};
++//// [O2.js]
++const o2 = {
++    async *f() {
++        const x = yield;
++    }
++};
++//// [O3.js]
++const o3 = {
++    async *f() {
++        const x = yield 1;
++    }
++};
++//// [O4.js]
++const o4 = {
++    async *f() {
++        const x = yield* [1];
++    }
++};
++//// [O5.js]
++const o5 = {
++    async *f() {
++        const x = yield* (async function* () { yield 1; })();
++    }
++};
++//// [O6.js]
++const o6 = {
++    async *f() {
++        const x = await 1;
++    }
++};
++//// [O7.js]
++const o7 = {
++    async *f() {
++        return 1;
++    }
++};
+diff --git a/tests/baselines/reference/emitter.forAwait.esnext.mjs b/tests/baselines/reference/emitter.forAwait.esnext.mjs
+new file mode 100644
+index 00000000000..0042ae38fbd
+--- /dev/null
++++ b/tests/baselines/reference/emitter.forAwait.esnext.mjs
+@@ -0,0 +1,83 @@
++//// [tests/cases/conformance/emitter/esnext/forAwait/emitter.forAwait.esnext.ts] ////
++
++//// [file1.ts]
++async function f1() {
++    let y: any;
++    for await (const x of y) {
++    }
++}
++//// [file2.ts]
++async function f2() {
++    let x: any, y: any;
++    for await (x of y) {
++    }
++}
++//// [file3.ts]
++async function* f3() {
++    let y: any;
++    for await (const x of y) {
++    }
++}
++//// [file4.ts]
++async function* f4() {
++    let x: any, y: any;
++    for await (x of y) {
++    }
++}
++//// [file5.ts]
++// https://github.com/Microsoft/TypeScript/issues/21363
++async function f5() {
++    let y: any;
++    outer: for await (const x of y) {
++        continue outer;
++    }
++}
++//// [file6.ts]
++// https://github.com/Microsoft/TypeScript/issues/21363
++async function* f6() {
++    let y: any;
++    outer: for await (const x of y) {
++        continue outer;
++    }
++}
++
++//// [file1.js]
++async function f1() {
++    let y;
++    for await (const x of y) {
++    }
++}
++//// [file2.js]
++async function f2() {
++    let x, y;
++    for await (x of y) {
++    }
++}
++//// [file3.js]
++async function* f3() {
++    let y;
++    for await (const x of y) {
++    }
++}
++//// [file4.js]
++async function* f4() {
++    let x, y;
++    for await (x of y) {
++    }
++}
++//// [file5.js]
++// https://github.com/Microsoft/TypeScript/issues/21363
++async function f5() {
++    let y;
++    outer: for await (const x of y) {
++        continue outer;
++    }
++}
++//// [file6.js]
++// https://github.com/Microsoft/TypeScript/issues/21363
++async function* f6() {
++    let y;
++    outer: for await (const x of y) {
++        continue outer;
++    }
++}
+diff --git a/tests/baselines/reference/emitter.noCatchBinding.esnext.mjs b/tests/baselines/reference/emitter.noCatchBinding.esnext.mjs
+new file mode 100644
+index 00000000000..f47a947ca1a
+--- /dev/null
++++ b/tests/baselines/reference/emitter.noCatchBinding.esnext.mjs
+@@ -0,0 +1,22 @@
++//// [emitter.noCatchBinding.esnext.ts]
++function f() {
++    try { } catch { }
++    try { } catch { 
++        try { } catch { }
++    }
++    try { } catch { } finally { }
++}
++
++//// [emitter.noCatchBinding.esnext.js]
++function f() {
++    try { }
++    catch { }
++    try { }
++    catch {
++        try { }
++        catch { }
++    }
++    try { }
++    catch { }
++    finally { }
++}
+diff --git a/tests/baselines/reference/forAwaitForUnion.mjs b/tests/baselines/reference/forAwaitForUnion.mjs
+new file mode 100644
+index 00000000000..e0a4b9ebf82
+--- /dev/null
++++ b/tests/baselines/reference/forAwaitForUnion.mjs
+@@ -0,0 +1,11 @@
++//// [forAwaitForUnion.ts]
++async function f<T>(source: Iterable<T> | AsyncIterable<T>) {
++    for await (const x of source) {
++    }
++}
++
++//// [forAwaitForUnion.js]
++async function f(source) {
++    for await (const x of source) {
++    }
++}
+diff --git a/tests/baselines/reference/generatorNoImplicitReturns.mjs b/tests/baselines/reference/generatorNoImplicitReturns.mjs
+new file mode 100644
+index 00000000000..d43e801ba99
+--- /dev/null
++++ b/tests/baselines/reference/generatorNoImplicitReturns.mjs
+@@ -0,0 +1,17 @@
++//// [generatorNoImplicitReturns.ts]
++ 
++function* testGenerator () { 
++  if (Math.random() > 0.5) { 
++      return; 
++  } 
++  yield 'hello'; 
++}
++
++
++//// [generatorNoImplicitReturns.js]
++function* testGenerator() {
++    if (Math.random() > 0.5) {
++        return;
++    }
++    yield 'hello';
++}
+diff --git a/tests/baselines/reference/generatorReturnExpressionIsChecked.mjs b/tests/baselines/reference/generatorReturnExpressionIsChecked.mjs
+new file mode 100644
+index 00000000000..58eb6f90442
+--- /dev/null
++++ b/tests/baselines/reference/generatorReturnExpressionIsChecked.mjs
+@@ -0,0 +1,10 @@
++//// [generatorReturnExpressionIsChecked.ts]
++function* f(): Iterator<number> {
++    return invalid;
++}
++
++
++//// [generatorReturnExpressionIsChecked.js]
++function* f() {
++    return invalid;
++}
+diff --git a/tests/baselines/reference/importCallExpression1ESNext.mjs b/tests/baselines/reference/importCallExpression1ESNext.mjs
+new file mode 100644
+index 00000000000..32d45aaf628
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression1ESNext.mjs
+@@ -0,0 +1,30 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression1ESNext.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++})
++
++export var p2 = import("./0");
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++export var p2 = import("./0");
++function foo() {
++    const p2 = import("./0");
++}
+diff --git a/tests/baselines/reference/importCallExpression2ESNext.mjs b/tests/baselines/reference/importCallExpression2ESNext.mjs
+new file mode 100644
+index 00000000000..662f57f07ff
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression2ESNext.mjs
+@@ -0,0 +1,29 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression2ESNext.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++function foo(x: Promise<any>) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    })
++}
++
++foo(import("./0"));
++
++//// [0.js]
++export class B {
++    print() { return "I am B"; }
++}
++//// [2.js]
++function foo(x) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    });
++}
++foo(import("./0"));
+diff --git a/tests/baselines/reference/importCallExpression3ESNext.mjs b/tests/baselines/reference/importCallExpression3ESNext.mjs
+new file mode 100644
+index 00000000000..0cd41388616
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression3ESNext.mjs
+@@ -0,0 +1,27 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression3ESNext.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++async function foo() {
++    class C extends (await import("./0")).B {}
++    var c = new C();
++    c.print();
++}
++foo();
++
++//// [0.js]
++export class B {
++    print() { return "I am B"; }
++}
++//// [2.js]
++async function foo() {
++    class C extends (await import("./0")).B {
++    }
++    var c = new C();
++    c.print();
++}
++foo();
+diff --git a/tests/baselines/reference/importCallExpression4ESNext.mjs b/tests/baselines/reference/importCallExpression4ESNext.mjs
+new file mode 100644
+index 00000000000..d5d4a51d69f
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression4ESNext.mjs
+@@ -0,0 +1,51 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression4ESNext.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare var console: any;
++class C {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import ("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++//// [0.js]
++export class B {
++    print() { return "I am B"; }
++}
++export function foo() { return "foo"; }
++//// [1.js]
++export function backup() { return "backup"; }
++//// [2.js]
++class C {
++    constructor() {
++        this.myModule = import("./0");
++    }
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async (err) => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
+diff --git a/tests/baselines/reference/importCallExpression5ESNext.mjs b/tests/baselines/reference/importCallExpression5ESNext.mjs
+new file mode 100644
+index 00000000000..1f4c789120b
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression5ESNext.mjs
+@@ -0,0 +1,33 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression5ESNext.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare function bar(): boolean;
++const specify = bar() ? "./0" : undefined;
++let myModule = import(specify);
++let myModule1 = import(undefined);
++let myModule2 = import(bar() ? "./1" : null);
++let myModule3 = import(null);
++
++//// [0.js]
++export class B {
++    print() { return "I am B"; }
++}
++export function foo() { return "foo"; }
++//// [1.js]
++export function backup() { return "backup"; }
++//// [2.js]
++const specify = bar() ? "./0" : undefined;
++let myModule = import(specify);
++let myModule1 = import(undefined);
++let myModule2 = import(bar() ? "./1" : null);
++let myModule3 = import(null);
+diff --git a/tests/baselines/reference/importCallExpression6ESNext.mjs b/tests/baselines/reference/importCallExpression6ESNext.mjs
+new file mode 100644
+index 00000000000..bdac7328f69
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpression6ESNext.mjs
+@@ -0,0 +1,33 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpression6ESNext.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare function bar(): boolean;
++const specify = bar() ? "./0" : undefined;
++let myModule = import(specify);
++let myModule1 = import(undefined);
++let myModule2 = import(bar() ? "./1" : null);
++let myModule3 = import(null);
++
++//// [0.js]
++export class B {
++    print() { return "I am B"; }
++}
++export function foo() { return "foo"; }
++//// [1.js]
++export function backup() { return "backup"; }
++//// [2.js]
++const specify = bar() ? "./0" : undefined;
++let myModule = import(specify);
++let myModule1 = import(undefined);
++let myModule2 = import(bar() ? "./1" : null);
++let myModule3 = import(null);
+diff --git a/tests/baselines/reference/importCallExpressionAsyncESNext.mjs b/tests/baselines/reference/importCallExpressionAsyncESNext.mjs
+new file mode 100644
+index 00000000000..7d5f2b0ed25
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionAsyncESNext.mjs
+@@ -0,0 +1,56 @@
++//// [test.ts]
++export async function fn() {
++    const req = await import('./test') // ONE
++}
++
++export class cl1 {
++    public async m() {
++        const req = await import('./test') // TWO
++    }
++}
++
++export const obj = {
++    m: async () => {
++        const req = await import('./test') // THREE
++    }
++}
++
++export class cl2 {
++    public p = {
++        m: async () => {
++            const req = await import('./test') // FOUR
++        }
++    }
++}
++
++export const l = async () => {
++    const req = await import('./test') // FIVE
++}
++
++
++//// [test.js]
++export async function fn() {
++    const req = await import('./test'); // ONE
++}
++export class cl1 {
++    async m() {
++        const req = await import('./test'); // TWO
++    }
++}
++export const obj = {
++    m: async () => {
++        const req = await import('./test'); // THREE
++    }
++};
++export class cl2 {
++    constructor() {
++        this.p = {
++            m: async () => {
++                const req = await import('./test'); // FOUR
++            }
++        };
++    }
++}
++export const l = async () => {
++    const req = await import('./test'); // FIVE
++};
+diff --git a/tests/baselines/reference/importCallExpressionDeclarationEmit2.mjs b/tests/baselines/reference/importCallExpressionDeclarationEmit2.mjs
+new file mode 100644
+index 00000000000..7659e94ee81
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionDeclarationEmit2.mjs
+@@ -0,0 +1,16 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionDeclarationEmit2.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++var p1 = import("./0");
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++var p1 = import("./0");
++
++
++//// [0.d.ts]
++export declare function foo(): string;
+diff --git a/tests/baselines/reference/importCallExpressionDeclarationEmit3.mjs b/tests/baselines/reference/importCallExpressionDeclarationEmit3.mjs
+new file mode 100644
+index 00000000000..d38c2309a33
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionDeclarationEmit3.mjs
+@@ -0,0 +1,31 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionDeclarationEmit3.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++declare function getPath(): string;
++import * as Zero from "./0";
++import("./0");
++
++export var p0: Promise<typeof Zero> = import(getPath());
++export var p1: Promise<typeof Zero> = import("./0");
++export var p2: Promise<any> = import("./0");
++
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++import("./0");
++export var p0 = import(getPath());
++export var p1 = import("./0");
++export var p2 = import("./0");
++
++
++//// [0.d.ts]
++export declare function foo(): string;
++//// [1.d.ts]
++import * as Zero from "./0";
++export declare var p0: Promise<typeof Zero>;
++export declare var p1: Promise<typeof Zero>;
++export declare var p2: Promise<any>;
+diff --git a/tests/baselines/reference/importCallExpressionErrorInES2015.mjs b/tests/baselines/reference/importCallExpressionErrorInES2015.mjs
+new file mode 100644
+index 00000000000..f07486504ee
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionErrorInES2015.mjs
+@@ -0,0 +1,27 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionErrorInES2015.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++})
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++function foo() {
++    const p2 = import("./0");
++}
+diff --git a/tests/baselines/reference/importCallExpressionInAMD1.mjs b/tests/baselines/reference/importCallExpressionInAMD1.mjs
+new file mode 100644
+index 00000000000..64e5aee2dda
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInAMD1.mjs
+@@ -0,0 +1,39 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInAMD1.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++
++export var p2 = import("./0");
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    function foo() { return "foo"; }
++    exports.foo = foo;
++});
++//// [1.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); });
++    var p1 = new Promise((resolve_2, reject_2) => { require(["./0"], resolve_2, reject_2); });
++    p1.then(zero => {
++        return zero.foo();
++    });
++    exports.p2 = new Promise((resolve_3, reject_3) => { require(["./0"], resolve_3, reject_3); });
++    function foo() {
++        const p2 = new Promise((resolve_4, reject_4) => { require(["./0"], resolve_4, reject_4); });
++    }
++});
+diff --git a/tests/baselines/reference/importCallExpressionInAMD2.mjs b/tests/baselines/reference/importCallExpressionInAMD2.mjs
+new file mode 100644
+index 00000000000..0d3f0e08d21
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInAMD2.mjs
+@@ -0,0 +1,39 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInAMD2.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++// We use Promise<any> for now as there is no way to specify shape of module object
++function foo(x: Promise<any>) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    })
++}
++
++foo(import("./0"));
++
++//// [0.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++});
++//// [2.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    // We use Promise<any> for now as there is no way to specify shape of module object
++    function foo(x) {
++        x.then(value => {
++            let b = new value.B();
++            b.print();
++        });
++    }
++    foo(new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); }));
++});
+diff --git a/tests/baselines/reference/importCallExpressionInAMD3.mjs b/tests/baselines/reference/importCallExpressionInAMD3.mjs
+new file mode 100644
+index 00000000000..07e7e922541
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInAMD3.mjs
+@@ -0,0 +1,35 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInAMD3.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++async function foo() {
++    class C extends (await import("./0")).B {}
++    var c = new C();
++    c.print();
++}
++foo();
++
++//// [0.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++});
++//// [2.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    async function foo() {
++        class C extends (await new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); })).B {
++        }
++        var c = new C();
++        c.print();
++    }
++    foo();
++});
+diff --git a/tests/baselines/reference/importCallExpressionInAMD4.mjs b/tests/baselines/reference/importCallExpressionInAMD4.mjs
+new file mode 100644
+index 00000000000..2fe29e5ae06
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInAMD4.mjs
+@@ -0,0 +1,96 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInAMD4.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare var console: any;
++class C {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++export class D {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++//// [0.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++    function foo() { return "foo"; }
++    exports.foo = foo;
++});
++//// [1.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    function backup() { return "backup"; }
++    exports.backup = backup;
++});
++//// [2.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class C {
++        constructor() {
++            this.myModule = new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); });
++        }
++        method() {
++            const loadAsync = new Promise((resolve_2, reject_2) => { require(["./0"], resolve_2, reject_2); });
++            this.myModule.then(Zero => {
++                console.log(Zero.foo());
++            }, async (err) => {
++                console.log(err);
++                let one = await new Promise((resolve_3, reject_3) => { require(["./1"], resolve_3, reject_3); });
++                console.log(one.backup());
++            });
++        }
++    }
++    class D {
++        constructor() {
++            this.myModule = new Promise((resolve_4, reject_4) => { require(["./0"], resolve_4, reject_4); });
++        }
++        method() {
++            const loadAsync = new Promise((resolve_5, reject_5) => { require(["./0"], resolve_5, reject_5); });
++            this.myModule.then(Zero => {
++                console.log(Zero.foo());
++            }, async (err) => {
++                console.log(err);
++                let one = await new Promise((resolve_6, reject_6) => { require(["./1"], resolve_6, reject_6); });
++                console.log(one.backup());
++            });
++        }
++    }
++    exports.D = D;
++});
+diff --git a/tests/baselines/reference/importCallExpressionInCJS1.mjs b/tests/baselines/reference/importCallExpressionInCJS1.mjs
+new file mode 100644
+index 00000000000..c814f5e5671
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInCJS1.mjs
+@@ -0,0 +1,35 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInCJS1.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++
++export var p2 = import("./0");
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++function foo() { return "foo"; }
++exports.foo = foo;
++//// [1.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++Promise.resolve().then(() => require("./0"));
++var p1 = Promise.resolve().then(() => require("./0"));
++p1.then(zero => {
++    return zero.foo();
++});
++exports.p2 = Promise.resolve().then(() => require("./0"));
++function foo() {
++    const p2 = Promise.resolve().then(() => require("./0"));
++}
+diff --git a/tests/baselines/reference/importCallExpressionInCJS2.mjs b/tests/baselines/reference/importCallExpressionInCJS2.mjs
+new file mode 100644
+index 00000000000..fb559cb1193
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInCJS2.mjs
+@@ -0,0 +1,40 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInCJS2.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++async function compute(promise: Promise<any>) {
++    let j = await promise;
++    if (!j) {
++        j = await import("./1");
++        return j.backup();
++    }
++    return j.foo();
++}
++
++compute(import("./0"));
++
++//// [0.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++function foo() { return "foo"; }
++exports.foo = foo;
++//// [1.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++function backup() { return "backup"; }
++exports.backup = backup;
++//// [2.js]
++async function compute(promise) {
++    let j = await promise;
++    if (!j) {
++        j = await Promise.resolve().then(() => require("./1"));
++        return j.backup();
++    }
++    return j.foo();
++}
++compute(Promise.resolve().then(() => require("./0")));
+diff --git a/tests/baselines/reference/importCallExpressionInCJS3.mjs b/tests/baselines/reference/importCallExpressionInCJS3.mjs
+new file mode 100644
+index 00000000000..616fbc9c3f9
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInCJS3.mjs
+@@ -0,0 +1,34 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInCJS3.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++// We use Promise<any> for now as there is no way to specify shape of module object
++function foo(x: Promise<any>) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    })
++}
++
++foo(import("./0"));
++
++//// [0.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++class B {
++    print() { return "I am B"; }
++}
++exports.B = B;
++//// [2.js]
++// We use Promise<any> for now as there is no way to specify shape of module object
++function foo(x) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    });
++}
++foo(Promise.resolve().then(() => require("./0")));
+diff --git a/tests/baselines/reference/importCallExpressionInCJS4.mjs b/tests/baselines/reference/importCallExpressionInCJS4.mjs
+new file mode 100644
+index 00000000000..b88295110b8
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInCJS4.mjs
+@@ -0,0 +1,30 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInCJS4.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++async function foo() {
++    class C extends (await import("./0")).B {}
++    var c = new C();
++    c.print();
++}
++foo();
++
++//// [0.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++class B {
++    print() { return "I am B"; }
++}
++exports.B = B;
++//// [2.js]
++async function foo() {
++    class C extends (await Promise.resolve().then(() => require("./0"))).B {
++    }
++    var c = new C();
++    c.print();
++}
++foo();
+diff --git a/tests/baselines/reference/importCallExpressionInCJS5.mjs b/tests/baselines/reference/importCallExpressionInCJS5.mjs
+new file mode 100644
+index 00000000000..b32b0e52c50
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInCJS5.mjs
+@@ -0,0 +1,90 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInCJS5.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare var console: any;
++class C {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import ("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++export class D {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++//// [0.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++class B {
++    print() { return "I am B"; }
++}
++exports.B = B;
++function foo() { return "foo"; }
++exports.foo = foo;
++//// [1.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++function backup() { return "backup"; }
++exports.backup = backup;
++//// [2.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++class C {
++    constructor() {
++        this.myModule = Promise.resolve().then(() => require("./0"));
++    }
++    method() {
++        const loadAsync = Promise.resolve().then(() => require("./0"));
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async (err) => {
++            console.log(err);
++            let one = await Promise.resolve().then(() => require("./1"));
++            console.log(one.backup());
++        });
++    }
++}
++class D {
++    constructor() {
++        this.myModule = Promise.resolve().then(() => require("./0"));
++    }
++    method() {
++        const loadAsync = Promise.resolve().then(() => require("./0"));
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async (err) => {
++            console.log(err);
++            let one = await Promise.resolve().then(() => require("./1"));
++            console.log(one.backup());
++        });
++    }
++}
++exports.D = D;
+diff --git a/tests/baselines/reference/importCallExpressionInExportEqualsAMD.mjs b/tests/baselines/reference/importCallExpressionInExportEqualsAMD.mjs
+new file mode 100644
+index 00000000000..1fcef2bde39
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInExportEqualsAMD.mjs
+@@ -0,0 +1,22 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInExportEqualsAMD.ts] ////
++
++//// [something.ts]
++export = 42;
++
++//// [index.ts]
++export = async function() {
++    const something = await import("./something");
++};
++
++//// [something.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    return 42;
++});
++//// [index.js]
++define(["require", "exports"], function (require, exports) {
++    "use strict";
++    return async function () {
++        const something = await new Promise((resolve_1, reject_1) => { require(["./something"], resolve_1, reject_1); });
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInExportEqualsCJS.mjs b/tests/baselines/reference/importCallExpressionInExportEqualsCJS.mjs
+new file mode 100644
+index 00000000000..72e3a0ec0af
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInExportEqualsCJS.mjs
+@@ -0,0 +1,18 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInExportEqualsCJS.ts] ////
++
++//// [something.ts]
++export = 42;
++
++//// [index.ts]
++export = async function() {
++    const something = await import("./something");
++};
++
++//// [something.js]
++"use strict";
++module.exports = 42;
++//// [index.js]
++"use strict";
++module.exports = async function () {
++    const something = await Promise.resolve().then(() => require("./something"));
++};
+diff --git a/tests/baselines/reference/importCallExpressionInExportEqualsUMD.mjs b/tests/baselines/reference/importCallExpressionInExportEqualsUMD.mjs
+new file mode 100644
+index 00000000000..5f70891b09e
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInExportEqualsUMD.mjs
+@@ -0,0 +1,39 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInExportEqualsUMD.ts] ////
++
++//// [something.ts]
++export = 42;
++
++//// [index.ts]
++export = async function() {
++    const something = await import("./something");
++};
++
++//// [something.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    return 42;
++});
++//// [index.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    var __syncRequire = typeof module === "object" && typeof module.exports === "object";
++    return async function () {
++        const something = await (__syncRequire ? Promise.resolve().then(() => require("./something")) : new Promise((resolve_1, reject_1) => { require(["./something"], resolve_1, reject_1); }));
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInSystem1.mjs b/tests/baselines/reference/importCallExpressionInSystem1.mjs
+new file mode 100644
+index 00000000000..74df68fc9a1
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInSystem1.mjs
+@@ -0,0 +1,50 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInSystem1.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++
++export var p2 = import("./0");
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    function foo() { return "foo"; }
++    exports_1("foo", foo);
++    return {
++        setters: [],
++        execute: function () {
++        }
++    };
++});
++//// [1.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    function foo() {
++        const p2 = context_1.import("./0");
++    }
++    var p1, p2;
++    return {
++        setters: [],
++        execute: function () {
++            context_1.import("./0");
++            p1 = context_1.import("./0");
++            p1.then(zero => {
++                return zero.foo();
++            });
++            exports_1("p2", p2 = context_1.import("./0"));
++        }
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInSystem2.mjs b/tests/baselines/reference/importCallExpressionInSystem2.mjs
+new file mode 100644
+index 00000000000..ea84e47e63c
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInSystem2.mjs
+@@ -0,0 +1,50 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInSystem2.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++// We use Promise<any> for now as there is no way to specify shape of module object
++function foo(x: Promise<any>) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    })
++}
++
++foo(import("./0"));
++
++//// [0.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    var B;
++    return {
++        setters: [],
++        execute: function () {
++            B = class B {
++                print() { return "I am B"; }
++            };
++            exports_1("B", B);
++        }
++    };
++});
++//// [2.js]
++System.register([], function (exports_1, context_1) {
++    var __moduleName = context_1 && context_1.id;
++    // We use Promise<any> for now as there is no way to specify shape of module object
++    function foo(x) {
++        x.then(value => {
++            let b = new value.B();
++            b.print();
++        });
++    }
++    return {
++        setters: [],
++        execute: function () {
++            foo(context_1.import("./0"));
++        }
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInSystem3.mjs b/tests/baselines/reference/importCallExpressionInSystem3.mjs
+new file mode 100644
+index 00000000000..309be9114fe
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInSystem3.mjs
+@@ -0,0 +1,46 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInSystem3.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++async function foo() {
++    class C extends (await import("./0")).B {}
++    var c = new C();
++    c.print();
++}
++foo();
++
++//// [0.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    var B;
++    return {
++        setters: [],
++        execute: function () {
++            B = class B {
++                print() { return "I am B"; }
++            };
++            exports_1("B", B);
++        }
++    };
++});
++//// [2.js]
++System.register([], function (exports_1, context_1) {
++    var __moduleName = context_1 && context_1.id;
++    async function foo() {
++        class C extends (await context_1.import("./0")).B {
++        }
++        var c = new C();
++        c.print();
++    }
++    return {
++        setters: [],
++        execute: function () {
++            foo();
++        }
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInSystem4.mjs b/tests/baselines/reference/importCallExpressionInSystem4.mjs
+new file mode 100644
+index 00000000000..b7bc1f51fe5
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInSystem4.mjs
+@@ -0,0 +1,113 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInSystem4.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare var console: any;
++class C {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++export class D {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++//// [0.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    function foo() { return "foo"; }
++    exports_1("foo", foo);
++    var B;
++    return {
++        setters: [],
++        execute: function () {
++            B = class B {
++                print() { return "I am B"; }
++            };
++            exports_1("B", B);
++        }
++    };
++});
++//// [1.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    function backup() { return "backup"; }
++    exports_1("backup", backup);
++    return {
++        setters: [],
++        execute: function () {
++        }
++    };
++});
++//// [2.js]
++System.register([], function (exports_1, context_1) {
++    "use strict";
++    var __moduleName = context_1 && context_1.id;
++    var C, D;
++    return {
++        setters: [],
++        execute: function () {
++            C = class C {
++                constructor() {
++                    this.myModule = context_1.import("./0");
++                }
++                method() {
++                    const loadAsync = context_1.import("./0");
++                    this.myModule.then(Zero => {
++                        console.log(Zero.foo());
++                    }, async (err) => {
++                        console.log(err);
++                        let one = await context_1.import("./1");
++                        console.log(one.backup());
++                    });
++                }
++            };
++            D = class D {
++                constructor() {
++                    this.myModule = context_1.import("./0");
++                }
++                method() {
++                    const loadAsync = context_1.import("./0");
++                    this.myModule.then(Zero => {
++                        console.log(Zero.foo());
++                    }, async (err) => {
++                        console.log(err);
++                        let one = await context_1.import("./1");
++                        console.log(one.backup());
++                    });
++                }
++            };
++            exports_1("D", D);
++        }
++    };
++});
+diff --git a/tests/baselines/reference/importCallExpressionInUMD1.mjs b/tests/baselines/reference/importCallExpressionInUMD1.mjs
+new file mode 100644
+index 00000000000..597e68e2d6f
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInUMD1.mjs
+@@ -0,0 +1,56 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInUMD1.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import("./0");
++var p1 = import("./0");
++p1.then(zero => {
++    return zero.foo();
++});
++
++export var p2 = import("./0");
++
++function foo() {
++    const p2 = import("./0");
++}
++
++//// [0.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    function foo() { return "foo"; }
++    exports.foo = foo;
++});
++//// [1.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    var __syncRequire = typeof module === "object" && typeof module.exports === "object";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); });
++    var p1 = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_2, reject_2) => { require(["./0"], resolve_2, reject_2); });
++    p1.then(zero => {
++        return zero.foo();
++    });
++    exports.p2 = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_3, reject_3) => { require(["./0"], resolve_3, reject_3); });
++    function foo() {
++        const p2 = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_4, reject_4) => { require(["./0"], resolve_4, reject_4); });
++    }
++});
+diff --git a/tests/baselines/reference/importCallExpressionInUMD2.mjs b/tests/baselines/reference/importCallExpressionInUMD2.mjs
+new file mode 100644
+index 00000000000..516800968c1
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInUMD2.mjs
+@@ -0,0 +1,56 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInUMD2.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++// We use Promise<any> for now as there is no way to specify shape of module object
++function foo(x: Promise<any>) {
++    x.then(value => {
++        let b = new value.B();
++        b.print();
++    })
++}
++
++foo(import("./0"));
++
++//// [0.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++});
++//// [2.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    var __syncRequire = typeof module === "object" && typeof module.exports === "object";
++    // We use Promise<any> for now as there is no way to specify shape of module object
++    function foo(x) {
++        x.then(value => {
++            let b = new value.B();
++            b.print();
++        });
++    }
++    foo(__syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); }));
++});
+diff --git a/tests/baselines/reference/importCallExpressionInUMD3.mjs b/tests/baselines/reference/importCallExpressionInUMD3.mjs
+new file mode 100644
+index 00000000000..57d200ca70c
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInUMD3.mjs
+@@ -0,0 +1,52 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInUMD3.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++//// [2.ts]
++async function foo() {
++    class C extends (await import("./0")).B {}
++    var c = new C();
++    c.print();
++}
++foo();
++
++//// [0.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++});
++//// [2.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    var __syncRequire = typeof module === "object" && typeof module.exports === "object";
++    async function foo() {
++        class C extends (await (__syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); }))).B {
++        }
++        var c = new C();
++        c.print();
++    }
++    foo();
++});
+diff --git a/tests/baselines/reference/importCallExpressionInUMD4.mjs b/tests/baselines/reference/importCallExpressionInUMD4.mjs
+new file mode 100644
+index 00000000000..70a574f0302
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionInUMD4.mjs
+@@ -0,0 +1,121 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionInUMD4.ts] ////
++
++//// [0.ts]
++export class B {
++    print() { return "I am B"}
++}
++
++export function foo() { return "foo" }
++
++//// [1.ts]
++export function backup() { return "backup"; }
++
++//// [2.ts]
++declare var console: any;
++class C {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++export class D {
++    private myModule = import("./0");
++    method() {
++        const loadAsync = import("./0");
++        this.myModule.then(Zero => {
++            console.log(Zero.foo());
++        }, async err => {
++            console.log(err);
++            let one = await import("./1");
++            console.log(one.backup());
++        });
++    }
++}
++
++//// [0.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class B {
++        print() { return "I am B"; }
++    }
++    exports.B = B;
++    function foo() { return "foo"; }
++    exports.foo = foo;
++});
++//// [1.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    function backup() { return "backup"; }
++    exports.backup = backup;
++});
++//// [2.js]
++(function (factory) {
++    if (typeof module === "object" && typeof module.exports === "object") {
++        var v = factory(require, exports);
++        if (v !== undefined) module.exports = v;
++    }
++    else if (typeof define === "function" && define.amd) {
++        define(["require", "exports"], factory);
++    }
++})(function (require, exports) {
++    "use strict";
++    var __syncRequire = typeof module === "object" && typeof module.exports === "object";
++    Object.defineProperty(exports, "__esModule", { value: true });
++    class C {
++        constructor() {
++            this.myModule = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_1, reject_1) => { require(["./0"], resolve_1, reject_1); });
++        }
++        method() {
++            const loadAsync = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_2, reject_2) => { require(["./0"], resolve_2, reject_2); });
++            this.myModule.then(Zero => {
++                console.log(Zero.foo());
++            }, async (err) => {
++                console.log(err);
++                let one = await (__syncRequire ? Promise.resolve().then(() => require("./1")) : new Promise((resolve_3, reject_3) => { require(["./1"], resolve_3, reject_3); }));
++                console.log(one.backup());
++            });
++        }
++    }
++    class D {
++        constructor() {
++            this.myModule = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_4, reject_4) => { require(["./0"], resolve_4, reject_4); });
++        }
++        method() {
++            const loadAsync = __syncRequire ? Promise.resolve().then(() => require("./0")) : new Promise((resolve_5, reject_5) => { require(["./0"], resolve_5, reject_5); });
++            this.myModule.then(Zero => {
++                console.log(Zero.foo());
++            }, async (err) => {
++                console.log(err);
++                let one = await (__syncRequire ? Promise.resolve().then(() => require("./1")) : new Promise((resolve_6, reject_6) => { require(["./1"], resolve_6, reject_6); }));
++                console.log(one.backup());
++            });
++        }
++    }
++    exports.D = D;
++});
+diff --git a/tests/baselines/reference/importCallExpressionIncorrect1.mjs b/tests/baselines/reference/importCallExpressionIncorrect1.mjs
+new file mode 100644
+index 00000000000..c007d1c8c6f
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionIncorrect1.mjs
+@@ -0,0 +1,13 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionIncorrect1.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++import
++import { foo } from './0';
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++import ;
+diff --git a/tests/baselines/reference/importCallExpressionIncorrect2.mjs b/tests/baselines/reference/importCallExpressionIncorrect2.mjs
+new file mode 100644
+index 00000000000..718bef9b9a8
+--- /dev/null
++++ b/tests/baselines/reference/importCallExpressionIncorrect2.mjs
+@@ -0,0 +1,12 @@
++//// [tests/cases/conformance/dynamicImport/importCallExpressionIncorrect2.ts] ////
++
++//// [0.ts]
++export function foo() { return "foo"; }
++
++//// [1.ts]
++var x = import { foo } from './0';
++
++//// [0.js]
++export function foo() { return "foo"; }
++//// [1.js]
++var x = ;
+diff --git a/tests/baselines/reference/importExportInternalComments.mjs b/tests/baselines/reference/importExportInternalComments.mjs
+new file mode 100644
+index 00000000000..c48d7a5ecf9
+--- /dev/null
++++ b/tests/baselines/reference/importExportInternalComments.mjs
+@@ -0,0 +1,25 @@
++//// [tests/cases/compiler/importExportInternalComments.ts] ////
++
++//// [include.d.ts]
++declare module "foo";
++
++//// [default.ts]
++/*1*/ export /*2*/ default /*3*/ Array /*4*/;
++
++//// [index.ts]
++/*1*/ import /*2*/ D /*3*/, /*4*/ { /*5*/ A /*6*/, /*7*/ B /*8*/ as /*9*/ C /*10*/ } /*11*/ from /*12*/ "foo";
++/*1*/ import /*2*/ * /*3*/ as /*4*/ foo /*5*/ from /*6*/ "foo";
++
++void D, A, C, foo; // Use the variables to prevent ellision
++
++/*1*/ export /*2*/ { /*3*/ A /*4*/, /*5*/ B /*6*/ as /*7*/ C /*8*/ } /*9*/ from /*10*/ "foo";
++/*1*/ export /*2*/ * /*3*/ from /*4*/ "foo"
++
++//// [default.js]
++/*1*/ export /*2*/ default /*3*/ Array /*4*/;
++//// [index.js]
++/*1*/ import /*2*/ D /*3*/, /*4*/ { /*5*/ A /*6*/, /*7*/ B /*8*/ as /*9*/ C /*10*/ } /*11*/ from /*12*/ "foo";
++/*1*/ import /*2*/ * /*3*/ as /*4*/ foo /*5*/ from /*6*/ "foo";
++void D, A, C, foo; // Use the variables to prevent ellision
++/*1*/ export /*2*/ { /*3*/ A /*4*/, /*5*/ B /*6*/ as /*7*/ C /*8*/ } /*9*/ from /*10*/ "foo";
++/*1*/ export /*2*/ * /*3*/ from /*4*/ "foo";
+diff --git a/tests/baselines/reference/jsFileCompilationWithMapFileAsJs.errors.txt b/tests/baselines/reference/jsFileCompilationWithMapFileAsJs.errors.txt
+index f9d88bd2727..bd231c85015 100644
+--- a/tests/baselines/reference/jsFileCompilationWithMapFileAsJs.errors.txt
++++ b/tests/baselines/reference/jsFileCompilationWithMapFileAsJs.errors.txt
+@@ -1,11 +1,11 @@
+ error TS5055: Cannot write file 'tests/cases/compiler/b.js' because it would overwrite input file.
+   Adding a tsconfig.json file will help organize projects that contain both TypeScript and JavaScript files. Learn more at https://aka.ms/tsconfig.
+-error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.js', '.jsx'.
++error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.mjs', '.js', '.jsx'.
+ 
+ 
+ !!! error TS5055: Cannot write file 'tests/cases/compiler/b.js' because it would overwrite input file.
+ !!! error TS5055:   Adding a tsconfig.json file will help organize projects that contain both TypeScript and JavaScript files. Learn more at https://aka.ms/tsconfig.
+-!!! error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.js', '.jsx'.
++!!! error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.mjs', '.js', '.jsx'.
+ ==== tests/cases/compiler/a.ts (0 errors) ====
+     class c {
+     }
+diff --git a/tests/baselines/reference/jsFileCompilationWithMapFileAsJsWithInlineSourceMap.errors.txt b/tests/baselines/reference/jsFileCompilationWithMapFileAsJsWithInlineSourceMap.errors.txt
+index f9d88bd2727..bd231c85015 100644
+--- a/tests/baselines/reference/jsFileCompilationWithMapFileAsJsWithInlineSourceMap.errors.txt
++++ b/tests/baselines/reference/jsFileCompilationWithMapFileAsJsWithInlineSourceMap.errors.txt
+@@ -1,11 +1,11 @@
+ error TS5055: Cannot write file 'tests/cases/compiler/b.js' because it would overwrite input file.
+   Adding a tsconfig.json file will help organize projects that contain both TypeScript and JavaScript files. Learn more at https://aka.ms/tsconfig.
+-error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.js', '.jsx'.
++error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.mjs', '.js', '.jsx'.
+ 
+ 
+ !!! error TS5055: Cannot write file 'tests/cases/compiler/b.js' because it would overwrite input file.
+ !!! error TS5055:   Adding a tsconfig.json file will help organize projects that contain both TypeScript and JavaScript files. Learn more at https://aka.ms/tsconfig.
+-!!! error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.js', '.jsx'.
++!!! error TS6054: File 'tests/cases/compiler/b.js.map' has unsupported extension. The only supported extensions are '.ts', '.tsx', '.d.ts', '.mjs', '.js', '.jsx'.
+ ==== tests/cases/compiler/a.ts (0 errors) ====
+     class c {
+     }
+diff --git a/tests/baselines/reference/maxNodeModuleJsDepthDefaultsToZero.trace.json b/tests/baselines/reference/maxNodeModuleJsDepthDefaultsToZero.trace.json
+index 56bbee705bf..611b7dd9a89 100644
+--- a/tests/baselines/reference/maxNodeModuleJsDepthDefaultsToZero.trace.json
++++ b/tests/baselines/reference/maxNodeModuleJsDepthDefaultsToZero.trace.json
+@@ -12,8 +12,10 @@
+     "Directory '/node_modules/@types' does not exist, skipping all lookups in it.",
+     "Loading module 'shortid' from 'node_modules' folder, target file type 'JavaScript'.",
+     "File '/node_modules/shortid/package.json' does not exist.",
++    "File '/node_modules/shortid.mjs' does not exist.",
+     "File '/node_modules/shortid.js' does not exist.",
+     "File '/node_modules/shortid.jsx' does not exist.",
++    "File '/node_modules/shortid/index.mjs' does not exist.",
+     "File '/node_modules/shortid/index.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/shortid/index.js', result '/node_modules/shortid/index.js'.",
+     "======== Module name 'shortid' was successfully resolved to '/node_modules/shortid/index.js'. ========"
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported.trace.json
+index b57862c09e3..822e4608c95 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported.trace.json
+@@ -13,6 +13,7 @@
+     "File '/jsx.d.ts' does not exist.",
+     "Directory '/jsx' does not exist, skipping all lookups in it.",
+     "Loading module as file / folder, candidate module location '/jsx', target file type 'JavaScript'.",
++    "File '/jsx.mjs' does not exist.",
+     "File '/jsx.js' does not exist.",
+     "File '/jsx.jsx' exist - use it as a name resolution result.",
+     "======== Module name './jsx' was successfully resolved to '/jsx.jsx'. ========",
+@@ -24,6 +25,7 @@
+     "File '/js.d.ts' does not exist.",
+     "Directory '/js' does not exist, skipping all lookups in it.",
+     "Loading module as file / folder, candidate module location '/js', target file type 'JavaScript'.",
++    "File '/js.mjs' does not exist.",
+     "File '/js.js' exist - use it as a name resolution result.",
+     "======== Module name './js' was successfully resolved to '/js.js'. ========"
+ ]
+\ No newline at end of file
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported2.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported2.trace.json
+index 7474cccdb35..2191e5cd0b2 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported2.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported2.trace.json
+@@ -7,6 +7,7 @@
+     "File '/jsx.d.ts' does not exist.",
+     "Directory '/jsx' does not exist, skipping all lookups in it.",
+     "Loading module as file / folder, candidate module location '/jsx', target file type 'JavaScript'.",
++    "File '/jsx.mjs' does not exist.",
+     "File '/jsx.js' does not exist.",
+     "File '/jsx.jsx' exist - use it as a name resolution result.",
+     "======== Module name './jsx' was successfully resolved to '/jsx.jsx'. ========"
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported3.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported3.trace.json
+index 7474cccdb35..2191e5cd0b2 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_notSupported3.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_notSupported3.trace.json
+@@ -7,6 +7,7 @@
+     "File '/jsx.d.ts' does not exist.",
+     "Directory '/jsx' does not exist, skipping all lookups in it.",
+     "Loading module as file / folder, candidate module location '/jsx', target file type 'JavaScript'.",
++    "File '/jsx.mjs' does not exist.",
+     "File '/jsx.js' does not exist.",
+     "File '/jsx.jsx' exist - use it as a name resolution result.",
+     "======== Module name './jsx' was successfully resolved to '/jsx.jsx'. ========"
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_unexpected.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_unexpected.trace.json
+index 5f32a4bf511..1864712b3a4 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_unexpected.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_unexpected.trace.json
+@@ -20,15 +20,18 @@
+     "'package.json' does not have a 'types' field.",
+     "'package.json' has 'main' field 'normalize.css' that references '/node_modules/normalize.css/normalize.css'.",
+     "Found 'package.json' at '/node_modules/normalize.css/package.json'.",
++    "File '/node_modules/normalize.css.mjs' does not exist.",
+     "File '/node_modules/normalize.css.js' does not exist.",
+     "File '/node_modules/normalize.css.jsx' does not exist.",
+     "'package.json' has 'main' field 'normalize.css' that references '/node_modules/normalize.css/normalize.css'.",
+     "File '/node_modules/normalize.css/normalize.css' exist - use it as a name resolution result.",
+     "File '/node_modules/normalize.css/normalize.css' has an unsupported extension, so skipping it.",
+     "Loading module as file / folder, candidate module location '/node_modules/normalize.css/normalize.css', target file type 'JavaScript'.",
++    "File '/node_modules/normalize.css/normalize.css.mjs' does not exist.",
+     "File '/node_modules/normalize.css/normalize.css.js' does not exist.",
+     "File '/node_modules/normalize.css/normalize.css.jsx' does not exist.",
+     "Directory '/node_modules/normalize.css/normalize.css' does not exist, skipping all lookups in it.",
++    "File '/node_modules/normalize.css/index.mjs' does not exist.",
+     "File '/node_modules/normalize.css/index.js' does not exist.",
+     "File '/node_modules/normalize.css/index.jsx' does not exist.",
+     "======== Module name 'normalize.css' was not resolved. ========"
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_unexpected2.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_unexpected2.trace.json
+index bab6be18d39..802bb3b69cc 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_unexpected2.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_unexpected2.trace.json
+@@ -29,9 +29,11 @@
+     "'package.json' does not have a 'typings' field.",
+     "'package.json' has 'types' field 'foo.js' that references '/node_modules/foo/foo.js'.",
+     "Found 'package.json' at '/node_modules/foo/package.json'.",
++    "File '/node_modules/foo.mjs' does not exist.",
+     "File '/node_modules/foo.js' does not exist.",
+     "File '/node_modules/foo.jsx' does not exist.",
+     "'package.json' does not have a 'main' field.",
++    "File '/node_modules/foo/index.mjs' does not exist.",
+     "File '/node_modules/foo/index.js' does not exist.",
+     "File '/node_modules/foo/index.jsx' does not exist.",
+     "======== Module name 'foo' was not resolved. ========"
+diff --git a/tests/baselines/reference/moduleResolutionWithExtensions_withAmbientPresent.trace.json b/tests/baselines/reference/moduleResolutionWithExtensions_withAmbientPresent.trace.json
+index 9a0d5e095a5..b68ce26e42a 100644
+--- a/tests/baselines/reference/moduleResolutionWithExtensions_withAmbientPresent.trace.json
++++ b/tests/baselines/reference/moduleResolutionWithExtensions_withAmbientPresent.trace.json
+@@ -12,8 +12,10 @@
+     "Directory '/node_modules/@types' does not exist, skipping all lookups in it.",
+     "Loading module 'js' from 'node_modules' folder, target file type 'JavaScript'.",
+     "File '/node_modules/js/package.json' does not exist.",
++    "File '/node_modules/js.mjs' does not exist.",
+     "File '/node_modules/js.js' does not exist.",
+     "File '/node_modules/js.jsx' does not exist.",
++    "File '/node_modules/js/index.mjs' does not exist.",
+     "File '/node_modules/js/index.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/js/index.js', result '/node_modules/js/index.js'.",
+     "======== Module name 'js' was successfully resolved to '/node_modules/js/index.js'. ========"
+diff --git a/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot.trace.json b/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot.trace.json
+index 453f5c088a3..320e908107e 100644
+--- a/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot.trace.json
++++ b/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot.trace.json
+@@ -14,8 +14,10 @@
+     "Loading module 'foo/bar' from 'node_modules' folder, target file type 'JavaScript'.",
+     "File '/node_modules/foo/bar/package.json' does not exist.",
+     "Found 'package.json' at '/node_modules/foo/package.json'. Package ID is 'foo/bar/index.d.ts@1.2.3'.",
++    "File '/node_modules/foo/bar.mjs' does not exist.",
+     "File '/node_modules/foo/bar.js' does not exist.",
+     "File '/node_modules/foo/bar.jsx' does not exist.",
++    "File '/node_modules/foo/bar/index.mjs' does not exist.",
+     "File '/node_modules/foo/bar/index.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/foo/bar/index.js', result '/node_modules/foo/bar/index.js'.",
+     "======== Module name 'foo/bar' was successfully resolved to '/node_modules/foo/bar/index.js'. ========"
+diff --git a/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot_fakeScopedPackage.trace.json b/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot_fakeScopedPackage.trace.json
+index b84bac8993a..4c163f46aa0 100644
+--- a/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot_fakeScopedPackage.trace.json
++++ b/tests/baselines/reference/moduleResolution_packageJson_yesAtPackageRoot_fakeScopedPackage.trace.json
+@@ -14,8 +14,10 @@
+     "Loading module 'foo/@bar' from 'node_modules' folder, target file type 'JavaScript'.",
+     "File '/node_modules/foo/@bar/package.json' does not exist.",
+     "Found 'package.json' at '/node_modules/foo/package.json'. Package ID is 'foo/@bar/index.d.ts@1.2.3'.",
++    "File '/node_modules/foo/@bar.mjs' does not exist.",
+     "File '/node_modules/foo/@bar.js' does not exist.",
+     "File '/node_modules/foo/@bar.jsx' does not exist.",
++    "File '/node_modules/foo/@bar/index.mjs' does not exist.",
+     "File '/node_modules/foo/@bar/index.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/foo/@bar/index.js', result '/node_modules/foo/@bar/index.js'.",
+     "======== Module name 'foo/@bar' was successfully resolved to '/node_modules/foo/@bar/index.js'. ========"
+diff --git a/tests/baselines/reference/objectLiteralPropertyImplicitlyAny.mjs b/tests/baselines/reference/objectLiteralPropertyImplicitlyAny.mjs
+new file mode 100644
+index 00000000000..f779b5095e1
+--- /dev/null
++++ b/tests/baselines/reference/objectLiteralPropertyImplicitlyAny.mjs
+@@ -0,0 +1,8 @@
++//// [objectLiteralPropertyImplicitlyAny.ts]
++const foo = Symbol.for("foo");
++const o = { [foo]: undefined };
++
++
++//// [objectLiteralPropertyImplicitlyAny.js]
++const foo = Symbol.for("foo");
++const o = { [foo]: undefined };
+diff --git a/tests/baselines/reference/objectSpreadNoTransform.mjs b/tests/baselines/reference/objectSpreadNoTransform.mjs
+new file mode 100644
+index 00000000000..5ad9c01e599
+--- /dev/null
++++ b/tests/baselines/reference/objectSpreadNoTransform.mjs
+@@ -0,0 +1,14 @@
++//// [objectSpreadNoTransform.ts]
++const y = { a: 'yes', b: 'no' };
++const o = { x: 1, ...y };
++var b;
++var rest: any;
++({ b, ...rest } = o);
++
++
++//// [objectSpreadNoTransform.js]
++const y = { a: 'yes', b: 'no' };
++const o = { x: 1, ...y };
++var b;
++var rest;
++({ b, ...rest } = o);
+diff --git a/tests/baselines/reference/packageJsonMain.trace.json b/tests/baselines/reference/packageJsonMain.trace.json
+index 6d39b9d4a7b..574abd59358 100644
+--- a/tests/baselines/reference/packageJsonMain.trace.json
++++ b/tests/baselines/reference/packageJsonMain.trace.json
+@@ -20,11 +20,13 @@
+     "'package.json' does not have a 'types' field.",
+     "'package.json' has 'main' field 'oof' that references '/node_modules/foo/oof'.",
+     "Found 'package.json' at '/node_modules/foo/package.json'.",
++    "File '/node_modules/foo.mjs' does not exist.",
+     "File '/node_modules/foo.js' does not exist.",
+     "File '/node_modules/foo.jsx' does not exist.",
+     "'package.json' has 'main' field 'oof' that references '/node_modules/foo/oof'.",
+     "File '/node_modules/foo/oof' does not exist.",
+     "Loading module as file / folder, candidate module location '/node_modules/foo/oof', target file type 'JavaScript'.",
++    "File '/node_modules/foo/oof.mjs' does not exist.",
+     "File '/node_modules/foo/oof.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/foo/oof.js', result '/node_modules/foo/oof.js'.",
+     "======== Module name 'foo' was successfully resolved to '/node_modules/foo/oof.js'. ========",
+@@ -49,6 +51,7 @@
+     "'package.json' does not have a 'types' field.",
+     "'package.json' has 'main' field 'rab.js' that references '/node_modules/bar/rab.js'.",
+     "Found 'package.json' at '/node_modules/bar/package.json'.",
++    "File '/node_modules/bar.mjs' does not exist.",
+     "File '/node_modules/bar.js' does not exist.",
+     "File '/node_modules/bar.jsx' does not exist.",
+     "'package.json' has 'main' field 'rab.js' that references '/node_modules/bar/rab.js'.",
+@@ -76,13 +79,16 @@
+     "'package.json' does not have a 'types' field.",
+     "'package.json' has 'main' field 'zab' that references '/node_modules/baz/zab'.",
+     "Found 'package.json' at '/node_modules/baz/package.json'.",
++    "File '/node_modules/baz.mjs' does not exist.",
+     "File '/node_modules/baz.js' does not exist.",
+     "File '/node_modules/baz.jsx' does not exist.",
+     "'package.json' has 'main' field 'zab' that references '/node_modules/baz/zab'.",
+     "File '/node_modules/baz/zab' does not exist.",
+     "Loading module as file / folder, candidate module location '/node_modules/baz/zab', target file type 'JavaScript'.",
++    "File '/node_modules/baz/zab.mjs' does not exist.",
+     "File '/node_modules/baz/zab.js' does not exist.",
+     "File '/node_modules/baz/zab.jsx' does not exist.",
++    "File '/node_modules/baz/zab/index.mjs' does not exist.",
+     "File '/node_modules/baz/zab/index.js' exist - use it as a name resolution result.",
+     "Resolving real path for '/node_modules/baz/zab/index.js', result '/node_modules/baz/zab/index.js'.",
+     "======== Module name 'baz' was successfully resolved to '/node_modules/baz/zab/index.js'. ========"
+diff --git a/tests/baselines/reference/packageJsonMain_isNonRecursive.trace.json b/tests/baselines/reference/packageJsonMain_isNonRecursive.trace.json
+index 81f5be11a6d..24169af606f 100644
+--- a/tests/baselines/reference/packageJsonMain_isNonRecursive.trace.json
++++ b/tests/baselines/reference/packageJsonMain_isNonRecursive.trace.json
+@@ -20,15 +20,19 @@
+     "'package.json' does not have a 'types' field.",
+     "'package.json' has 'main' field 'oof' that references '/node_modules/foo/oof'.",
+     "Found 'package.json' at '/node_modules/foo/package.json'.",
++    "File '/node_modules/foo.mjs' does not exist.",
+     "File '/node_modules/foo.js' does not exist.",
+     "File '/node_modules/foo.jsx' does not exist.",
+     "'package.json' has 'main' field 'oof' that references '/node_modules/foo/oof'.",
+     "File '/node_modules/foo/oof' does not exist.",
+     "Loading module as file / folder, candidate module location '/node_modules/foo/oof', target file type 'JavaScript'.",
++    "File '/node_modules/foo/oof.mjs' does not exist.",
+     "File '/node_modules/foo/oof.js' does not exist.",
+     "File '/node_modules/foo/oof.jsx' does not exist.",
++    "File '/node_modules/foo/oof/index.mjs' does not exist.",
+     "File '/node_modules/foo/oof/index.js' does not exist.",
+     "File '/node_modules/foo/oof/index.jsx' does not exist.",
++    "File '/node_modules/foo/index.mjs' does not exist.",
+     "File '/node_modules/foo/index.js' does not exist.",
+     "File '/node_modules/foo/index.jsx' does not exist.",
+     "======== Module name 'foo' was not resolved. ========"
+diff --git a/tests/baselines/reference/parserArrowFunctionExpression7.mjs b/tests/baselines/reference/parserArrowFunctionExpression7.mjs
+new file mode 100644
+index 00000000000..0646a1bf438
+--- /dev/null
++++ b/tests/baselines/reference/parserArrowFunctionExpression7.mjs
+@@ -0,0 +1,16 @@
++//// [parserArrowFunctionExpression7.ts]
++({
++	async m() {
++		for (;;) {
++		}
++	}
++});
++
++
++//// [parserArrowFunctionExpression7.js]
++({
++    async m() {
++        for (;;) {
++        }
++    }
++});
+diff --git a/tests/baselines/reference/potentiallyUncalledDecorators.mjs b/tests/baselines/reference/potentiallyUncalledDecorators.mjs
+new file mode 100644
+index 00000000000..b69f848a8c9
+--- /dev/null
++++ b/tests/baselines/reference/potentiallyUncalledDecorators.mjs
+@@ -0,0 +1,189 @@
++//// [potentiallyUncalledDecorators.ts]
++// Angular-style Input/Output API:
++declare function Input(bindingPropertyName?: string): any;
++class FooComponent {
++    @Input foo: string;
++}
++
++// Glimmer-style tracked API:
++declare const tracked: PropertyDecorator & { (...watchedProperties: string[]): any; }
++
++class Person {
++    @tracked person; any;
++}
++
++class MultiplyByTwo {
++    args: any;
++    @tracked('args')
++    get multiplied() {
++        return this.args.number * 2;
++    }
++}
++
++// Other fun stuff.
++
++interface OmniDecorator extends MethodDecorator, ClassDecorator, PropertyDecorator {
++}
++
++declare function noArgs(): OmniDecorator;
++declare function allRest(...args: any[]): OmniDecorator;
++declare function oneOptional(x?: any): OmniDecorator;
++declare function twoOptional(x?: any, y?: any): OmniDecorator;
++declare function threeOptional(x?: any, y?: any, z?: any): OmniDecorator;
++declare function oneOptionalWithRest(x?: any, ...args: any[]): OmniDecorator;
++declare const anyDec: any;
++
++@noArgs
++class A {
++    @noArgs foo: any;
++    @noArgs bar() { }
++}
++
++@allRest
++class B {
++    @allRest foo: any;
++    @allRest bar() { }
++}
++
++@oneOptional
++class C {
++    @oneOptional foo: any;
++    @oneOptional bar() { }
++}
++
++@twoOptional
++class D {
++    @twoOptional foo: any;
++    @twoOptional bar() { }
++}
++
++@threeOptional
++class E {
++    @threeOptional foo: any;
++    @threeOptional bar() { }
++}
++
++@oneOptionalWithRest
++class F {
++    @oneOptionalWithRest foo: any;
++    @oneOptionalWithRest bar() { }
++}
++
++@anyDec
++class G {
++    @anyDec foo: any;
++    @anyDec bar() { }
++}
++
++export { };
++
++
++//// [potentiallyUncalledDecorators.js]
++var __decorate = (this && this.__decorate) || function (decorators, target, key, desc) {
++    var c = arguments.length, r = c < 3 ? target : desc === null ? desc = Object.getOwnPropertyDescriptor(target, key) : desc, d;
++    if (typeof Reflect === "object" && typeof Reflect.decorate === "function") r = Reflect.decorate(decorators, target, key, desc);
++    else for (var i = decorators.length - 1; i >= 0; i--) if (d = decorators[i]) r = (c < 3 ? d(r) : c > 3 ? d(target, key, r) : d(target, key)) || r;
++    return c > 3 && r && Object.defineProperty(target, key, r), r;
++};
++class FooComponent {
++}
++__decorate([
++    Input
++], FooComponent.prototype, "foo", void 0);
++class Person {
++}
++__decorate([
++    tracked
++], Person.prototype, "person", void 0);
++class MultiplyByTwo {
++    get multiplied() {
++        return this.args.number * 2;
++    }
++}
++__decorate([
++    tracked('args')
++], MultiplyByTwo.prototype, "multiplied", null);
++let A = class A {
++    bar() { }
++};
++__decorate([
++    noArgs
++], A.prototype, "foo", void 0);
++__decorate([
++    noArgs
++], A.prototype, "bar", null);
++A = __decorate([
++    noArgs
++], A);
++let B = class B {
++    bar() { }
++};
++__decorate([
++    allRest
++], B.prototype, "foo", void 0);
++__decorate([
++    allRest
++], B.prototype, "bar", null);
++B = __decorate([
++    allRest
++], B);
++let C = class C {
++    bar() { }
++};
++__decorate([
++    oneOptional
++], C.prototype, "foo", void 0);
++__decorate([
++    oneOptional
++], C.prototype, "bar", null);
++C = __decorate([
++    oneOptional
++], C);
++let D = class D {
++    bar() { }
++};
++__decorate([
++    twoOptional
++], D.prototype, "foo", void 0);
++__decorate([
++    twoOptional
++], D.prototype, "bar", null);
++D = __decorate([
++    twoOptional
++], D);
++let E = class E {
++    bar() { }
++};
++__decorate([
++    threeOptional
++], E.prototype, "foo", void 0);
++__decorate([
++    threeOptional
++], E.prototype, "bar", null);
++E = __decorate([
++    threeOptional
++], E);
++let F = class F {
++    bar() { }
++};
++__decorate([
++    oneOptionalWithRest
++], F.prototype, "foo", void 0);
++__decorate([
++    oneOptionalWithRest
++], F.prototype, "bar", null);
++F = __decorate([
++    oneOptionalWithRest
++], F);
++let G = class G {
++    bar() { }
++};
++__decorate([
++    anyDec
++], G.prototype, "foo", void 0);
++__decorate([
++    anyDec
++], G.prototype, "bar", null);
++G = __decorate([
++    anyDec
++], G);
+diff --git a/tests/baselines/reference/taggedTemplatesWithTypeArguments1.mjs b/tests/baselines/reference/taggedTemplatesWithTypeArguments1.mjs
+new file mode 100644
+index 00000000000..b31d3270208
+--- /dev/null
++++ b/tests/baselines/reference/taggedTemplatesWithTypeArguments1.mjs
+@@ -0,0 +1,72 @@
++//// [taggedTemplatesWithTypeArguments1.ts]
++declare function f<T>(strs: TemplateStringsArray, ...callbacks: Array<(x: T) => any>): void;
++
++interface Stuff {
++    x: number;
++    y: string;
++    z: boolean;
++}
++
++export const a = f<Stuff> `
++    hello
++    ${stuff => stuff.x}
++    brave
++    ${stuff => stuff.y}
++    world
++    ${stuff => stuff.z}
++`;
++
++declare function g<Input, T, U, V>(
++    strs: TemplateStringsArray,
++    t: (i: Input) => T, u: (i: Input) => U, v: (i: Input) => V): T | U | V;
++
++export const b = g<Stuff, number, string, boolean> `
++    hello
++    ${stuff => stuff.x}
++    brave
++    ${stuff => stuff.y}
++    world
++    ${stuff => stuff.z}
++`;
++
++declare let obj: {
++    prop: <T>(strs: TemplateStringsArray, x: (input: T) => T) => {
++        returnedObjProp: T
++    }
++}
++
++export let c = obj["prop"]<Stuff> `${(input) => ({ ...input })}`
++c.returnedObjProp.x;
++c.returnedObjProp.y;
++c.returnedObjProp.z;
++
++c = obj.prop<Stuff> `${(input) => ({ ...input })}`
++c.returnedObjProp.x;
++c.returnedObjProp.y;
++c.returnedObjProp.z;
++
++//// [taggedTemplatesWithTypeArguments1.js]
++export const a = f `
++    hello
++    ${stuff => stuff.x}
++    brave
++    ${stuff => stuff.y}
++    world
++    ${stuff => stuff.z}
++`;
++export const b = g `
++    hello
++    ${stuff => stuff.x}
++    brave
++    ${stuff => stuff.y}
++    world
++    ${stuff => stuff.z}
++`;
++export let c = obj["prop"] `${(input) => ({ ...input })}`;
++c.returnedObjProp.x;
++c.returnedObjProp.y;
++c.returnedObjProp.z;
++c = obj.prop `${(input) => ({ ...input })}`;
++c.returnedObjProp.x;
++c.returnedObjProp.y;
++c.returnedObjProp.z;
+diff --git a/tests/baselines/reference/taggedTemplatesWithTypeArguments2.mjs b/tests/baselines/reference/taggedTemplatesWithTypeArguments2.mjs
+new file mode 100644
+index 00000000000..bc170467fa8
+--- /dev/null
++++ b/tests/baselines/reference/taggedTemplatesWithTypeArguments2.mjs
+@@ -0,0 +1,61 @@
++//// [taggedTemplatesWithTypeArguments2.ts]
++export interface SomethingTaggable {
++    <T>(t: TemplateStringsArray, ...args: T[]): SomethingNewable;
++}
++
++export interface SomethingNewable {
++    new <T>(...args: T[]): any;
++}
++
++declare const tag: SomethingTaggable;
++
++const a = new tag `${100} ${200}`<string>("hello", "world");
++
++const b = new tag<number> `${"hello"} ${"world"}`(100, 200);
++
++const c = new tag<number> `${100} ${200}`<string>("hello", "world");
++
++const d = new tag<number> `${"hello"} ${"world"}`<string>(100, 200);
++
++/**
++ * Testing ASI. This should never parse as
++ *
++ * ```ts
++ * new tag<number>;
++ * `hello${369}`();
++ * ```
++ */
++const e = new tag<number>
++`hello`();
++
++class SomeBase<A, B, C> {
++    a!: A; b!: B; c!: C;
++}
++
++class SomeDerived<T> extends SomeBase<number, string, T> {
++    constructor() {
++        super<number, string, T> `hello world`;
++    }
++}
++
++//// [taggedTemplatesWithTypeArguments2.js]
++const a = new tag `${100} ${200}`("hello", "world");
++const b = new tag `${"hello"} ${"world"}`(100, 200);
++const c = (new tag `${100} ${200}`)("hello", "world");
++const d = (new tag `${"hello"} ${"world"}`)(100, 200);
++/**
++ * Testing ASI. This should never parse as
++ *
++ * ```ts
++ * new tag<number>;
++ * `hello${369}`();
++ * ```
++ */
++const e = new tag `hello`();
++class SomeBase {
++}
++class SomeDerived extends SomeBase {
++    constructor() {
++        super. `hello world`;
++    }
++}
+diff --git a/tests/baselines/reference/typeRootsFromMultipleNodeModulesDirectories.trace.json b/tests/baselines/reference/typeRootsFromMultipleNodeModulesDirectories.trace.json
+index fdcbcdb7ab1..9fe4885a2ab 100644
+--- a/tests/baselines/reference/typeRootsFromMultipleNodeModulesDirectories.trace.json
++++ b/tests/baselines/reference/typeRootsFromMultipleNodeModulesDirectories.trace.json
+@@ -13,8 +13,10 @@
+     "File '/node_modules/@types/xyz.d.ts' does not exist.",
+     "Loading module 'xyz' from 'node_modules' folder, target file type 'JavaScript'.",
+     "Directory '/foo/bar/node_modules' does not exist, skipping all lookups in it.",
++    "File '/foo/node_modules/xyz.mjs' does not exist.",
+     "File '/foo/node_modules/xyz.js' does not exist.",
+     "File '/foo/node_modules/xyz.jsx' does not exist.",
++    "File '/node_modules/xyz.mjs' does not exist.",
+     "File '/node_modules/xyz.js' does not exist.",
+     "File '/node_modules/xyz.jsx' does not exist.",
+     "======== Module name 'xyz' was not resolved. ========",
+@@ -32,8 +34,10 @@
+     "File '/node_modules/@types/pdq.d.ts' does not exist.",
+     "Loading module 'pdq' from 'node_modules' folder, target file type 'JavaScript'.",
+     "Directory '/foo/bar/node_modules' does not exist, skipping all lookups in it.",
++    "File '/foo/node_modules/pdq.mjs' does not exist.",
+     "File '/foo/node_modules/pdq.js' does not exist.",
+     "File '/foo/node_modules/pdq.jsx' does not exist.",
++    "File '/node_modules/pdq.mjs' does not exist.",
+     "File '/node_modules/pdq.js' does not exist.",
+     "File '/node_modules/pdq.jsx' does not exist.",
+     "======== Module name 'pdq' was not resolved. ========",
+@@ -51,8 +55,10 @@
+     "File '/node_modules/@types/abc.d.ts' does not exist.",
+     "Loading module 'abc' from 'node_modules' folder, target file type 'JavaScript'.",
+     "Directory '/foo/bar/node_modules' does not exist, skipping all lookups in it.",
++    "File '/foo/node_modules/abc.mjs' does not exist.",
+     "File '/foo/node_modules/abc.js' does not exist.",
+     "File '/foo/node_modules/abc.jsx' does not exist.",
++    "File '/node_modules/abc.mjs' does not exist.",
+     "File '/node_modules/abc.js' does not exist.",
+     "File '/node_modules/abc.jsx' does not exist.",
+     "======== Module name 'abc' was not resolved. ========",
+diff --git a/tests/baselines/reference/typeRootsFromNodeModulesInParentDirectory.trace.json b/tests/baselines/reference/typeRootsFromNodeModulesInParentDirectory.trace.json
+index a15e20239c6..84e3fdcfce9 100644
+--- a/tests/baselines/reference/typeRootsFromNodeModulesInParentDirectory.trace.json
++++ b/tests/baselines/reference/typeRootsFromNodeModulesInParentDirectory.trace.json
+@@ -9,6 +9,7 @@
+     "File '/node_modules/@types/xyz.d.ts' does not exist.",
+     "Loading module 'xyz' from 'node_modules' folder, target file type 'JavaScript'.",
+     "Directory '/src/node_modules' does not exist, skipping all lookups in it.",
++    "File '/node_modules/xyz.mjs' does not exist.",
+     "File '/node_modules/xyz.js' does not exist.",
+     "File '/node_modules/xyz.jsx' does not exist.",
+     "======== Module name 'xyz' was not resolved. ========",
+diff --git a/tests/baselines/reference/uniqueSymbols.mjs b/tests/baselines/reference/uniqueSymbols.mjs
+new file mode 100644
+index 00000000000..6c723c8dec1
+--- /dev/null
++++ b/tests/baselines/reference/uniqueSymbols.mjs
+@@ -0,0 +1,450 @@
++//// [uniqueSymbols.ts]
++// declarations with call initializer
++const constCall = Symbol();
++let letCall = Symbol();
++var varCall = Symbol();
++
++// ambient declaration with type
++declare const constType: unique symbol;
++
++// declaration with type and call initializer
++const constTypeAndCall: unique symbol = Symbol();
++
++// declaration from initializer
++const constInitToConstCall = constCall;
++const constInitToLetCall = letCall;
++const constInitToVarCall = varCall;
++const constInitToConstDeclAmbient = constType;
++let letInitToConstCall = constCall;
++let letInitToLetCall = letCall;
++let letInitToVarCall = varCall;
++let letInitToConstDeclAmbient = constType;
++var varInitToConstCall = constCall;
++var varInitToLetCall = letCall;
++var varInitToVarCall = varCall;
++var varInitToConstDeclAmbient = constType;
++
++// declaration from initializer with type query
++const constInitToConstCallWithTypeQuery: typeof constCall = constCall;
++const constInitToConstDeclAmbientWithTypeQuery: typeof constType = constType;
++
++// function return inference
++function funcReturnConstCall() { return constCall; }
++function funcReturnLetCall() { return letCall; }
++function funcReturnVarCall() { return varCall; }
++
++// function return value with type query
++function funcReturnConstCallWithTypeQuery(): typeof constCall { return constCall; }
++
++// generator function yield inference
++function* genFuncYieldConstCall() { yield constCall; }
++function* genFuncYieldLetCall() { yield letCall; }
++function* genFuncYieldVarCall() { yield varCall; }
++
++// generator function yield with return type query
++function* genFuncYieldConstCallWithTypeQuery(): IterableIterator<typeof constCall> { yield constCall; }
++
++// async function return inference
++async function asyncFuncReturnConstCall() { return constCall; }
++async function asyncFuncReturnLetCall() { return letCall; }
++async function asyncFuncReturnVarCall() { return varCall; }
++
++// async generator function yield inference
++async function* asyncGenFuncYieldConstCall() { yield constCall; }
++async function* asyncGenFuncYieldLetCall() { yield letCall; }
++async function* asyncGenFuncYieldVarCall() { yield varCall; }
++
++// classes
++class C {
++    static readonly readonlyStaticCall = Symbol();
++    static readonly readonlyStaticType: unique symbol;
++    static readonly readonlyStaticTypeAndCall: unique symbol = Symbol();
++    static readwriteStaticCall = Symbol();
++
++    readonly readonlyCall = Symbol();
++    readwriteCall = Symbol();
++}
++declare const c: C;
++
++const constInitToCReadonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCall = C.readwriteStaticCall;
++
++const constInitToCReadonlyStaticCallWithTypeQuery: typeof C.readonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticTypeWithTypeQuery: typeof C.readonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCallWithTypeQuery: typeof C.readonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCallWithTypeQuery: typeof C.readwriteStaticCall = C.readwriteStaticCall;
++
++const constInitToCReadonlyCall = c.readonlyCall;
++const constInitToCReadwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithTypeQuery: typeof c.readonlyCall = c.readonlyCall;
++const constInitToCReadwriteCallWithTypeQuery: typeof c.readwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithIndexedAccess: C["readonlyCall"] = c.readonlyCall;
++const constInitToCReadwriteCallWithIndexedAccess: C["readwriteCall"] = c.readwriteCall;
++
++// interfaces
++interface I {
++    readonly readonlyType: unique symbol;
++}
++declare const i: I;
++
++const constInitToIReadonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithTypeQuery: typeof i.readonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithIndexedAccess: I["readonlyType"] = i.readonlyType;
++
++// type literals
++type L = {
++    readonly readonlyType: unique symbol;
++    nested: {
++        readonly readonlyNestedType: unique symbol;
++    }
++};
++declare const l: L;
++
++const constInitToLReadonlyType = l.readonlyType;
++const constInitToLReadonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithTypeQuery: typeof l.readonlyType = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithTypeQuery: typeof l.nested.readonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithIndexedAccess: L["readonlyType"] = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithIndexedAccess: L["nested"]["readonlyNestedType"] = l.nested.readonlyNestedType;
++
++// type argument inference
++const promiseForConstCall = Promise.resolve(constCall);
++const arrayOfConstCall = [constCall];
++
++// unique symbol widening in expressions
++declare const s: unique symbol;
++declare namespace N { const s: unique symbol; }
++declare const o: { [s]: "a", [N.s]: "b" };
++declare function f<T>(x: T): T;
++declare function g(x: typeof s): void;
++declare function g(x: typeof N.s): void;
++
++// widening positions
++
++// argument inference
++f(s);
++f(N.s);
++f(N["s"]);
++
++// array literal elements
++[s];
++[N.s];
++[N["s"]];
++
++// property assignments/methods
++const o2 = {
++    a: s,
++    b: N.s,
++    c: N["s"],
++
++    method1() { return s; },
++    async method2() { return s; },
++    async * method3() { yield s; },
++    * method4() { yield s; },
++    method5(p = s) { return p; },
++};
++
++// property initializers
++class C0 {
++    static readonly a = s;
++    static readonly b = N.s;
++    static readonly c = N["s"];
++
++    static d = s;
++    static e = N.s;
++    static f = N["s"];
++
++    readonly a = s;
++    readonly b = N.s;
++    readonly c = N["s"];
++
++    d = s;
++    e = N.s;
++    f = N["s"];
++
++    method1() { return s; }
++    async method2() { return s; }
++    async * method3() { yield s; }
++    * method4() { yield s; }
++    method5(p = s) { return p; }
++}
++
++// non-widening positions
++
++// element access
++o[s];
++o[N.s];
++o[N["s"]];
++
++// arguments (no-inference)
++f<typeof s>(s);
++f<typeof N.s>(N.s);
++f<typeof N.s>(N["s"]);
++g(s);
++g(N.s);
++g(N["s"]);
++
++// falsy expressions
++s || "";
++N.s || "";
++N["s"] || "";
++
++// conditionals
++Math.random() * 2 ? s : "a";
++Math.random() * 2 ? N.s : "a";
++Math.random() * 2 ? N["s"] : "a";
++
++// computed property names
++({
++    [s]: "a",
++    [N.s]: "b",
++});
++
++class C1 {
++    static [s]: "a";
++    static [N.s]: "b";
++
++    [s]: "a";
++    [N.s]: "b";
++}
++
++// contextual types
++
++interface Context {
++    method1(): typeof s;
++    method2(): Promise<typeof s>;
++    method3(): AsyncIterableIterator<typeof s>;
++    method4(): IterableIterator<typeof s>;
++    method5(p?: typeof s): typeof s;
++}
++
++const o3: Context = {
++    method1() {
++        return s; // return type should not widen due to contextual type
++    },
++    async method2() {
++        return s; // return type should not widen due to contextual type
++    },
++    async * method3() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    * method4() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    method5(p = s) { // parameter should not widen due to contextual type
++        return p;
++    },
++};
++
++// allowed when not emitting declarations
++
++const o4 = {
++    method1(p: typeof s): typeof s {
++        return p;
++    },
++    method2(p: I["readonlyType"]): I["readonlyType"] {
++        return p;
++    }
++};
++
++const ce0 = class {
++    method1(p: typeof s): typeof s {
++        return p;
++    }
++    method2(p: I["readonlyType"]): I["readonlyType"] {
++        return p;
++    }
++};
++
++function funcInferredReturnType(obj: { method(p: typeof s): void }) {
++    return obj;
++}
++
++
++//// [uniqueSymbols.js]
++// declarations with call initializer
++const constCall = Symbol();
++let letCall = Symbol();
++var varCall = Symbol();
++// declaration with type and call initializer
++const constTypeAndCall = Symbol();
++// declaration from initializer
++const constInitToConstCall = constCall;
++const constInitToLetCall = letCall;
++const constInitToVarCall = varCall;
++const constInitToConstDeclAmbient = constType;
++let letInitToConstCall = constCall;
++let letInitToLetCall = letCall;
++let letInitToVarCall = varCall;
++let letInitToConstDeclAmbient = constType;
++var varInitToConstCall = constCall;
++var varInitToLetCall = letCall;
++var varInitToVarCall = varCall;
++var varInitToConstDeclAmbient = constType;
++// declaration from initializer with type query
++const constInitToConstCallWithTypeQuery = constCall;
++const constInitToConstDeclAmbientWithTypeQuery = constType;
++// function return inference
++function funcReturnConstCall() { return constCall; }
++function funcReturnLetCall() { return letCall; }
++function funcReturnVarCall() { return varCall; }
++// function return value with type query
++function funcReturnConstCallWithTypeQuery() { return constCall; }
++// generator function yield inference
++function* genFuncYieldConstCall() { yield constCall; }
++function* genFuncYieldLetCall() { yield letCall; }
++function* genFuncYieldVarCall() { yield varCall; }
++// generator function yield with return type query
++function* genFuncYieldConstCallWithTypeQuery() { yield constCall; }
++// async function return inference
++async function asyncFuncReturnConstCall() { return constCall; }
++async function asyncFuncReturnLetCall() { return letCall; }
++async function asyncFuncReturnVarCall() { return varCall; }
++// async generator function yield inference
++async function* asyncGenFuncYieldConstCall() { yield constCall; }
++async function* asyncGenFuncYieldLetCall() { yield letCall; }
++async function* asyncGenFuncYieldVarCall() { yield varCall; }
++// classes
++class C {
++    constructor() {
++        this.readonlyCall = Symbol();
++        this.readwriteCall = Symbol();
++    }
++}
++C.readonlyStaticCall = Symbol();
++C.readonlyStaticTypeAndCall = Symbol();
++C.readwriteStaticCall = Symbol();
++const constInitToCReadonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCall = C.readwriteStaticCall;
++const constInitToCReadonlyStaticCallWithTypeQuery = C.readonlyStaticCall;
++const constInitToCReadonlyStaticTypeWithTypeQuery = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCallWithTypeQuery = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCallWithTypeQuery = C.readwriteStaticCall;
++const constInitToCReadonlyCall = c.readonlyCall;
++const constInitToCReadwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithTypeQuery = c.readonlyCall;
++const constInitToCReadwriteCallWithTypeQuery = c.readwriteCall;
++const constInitToCReadonlyCallWithIndexedAccess = c.readonlyCall;
++const constInitToCReadwriteCallWithIndexedAccess = c.readwriteCall;
++const constInitToIReadonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithTypeQuery = i.readonlyType;
++const constInitToIReadonlyTypeWithIndexedAccess = i.readonlyType;
++const constInitToLReadonlyType = l.readonlyType;
++const constInitToLReadonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithTypeQuery = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithTypeQuery = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithIndexedAccess = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithIndexedAccess = l.nested.readonlyNestedType;
++// type argument inference
++const promiseForConstCall = Promise.resolve(constCall);
++const arrayOfConstCall = [constCall];
++// widening positions
++// argument inference
++f(s);
++f(N.s);
++f(N["s"]);
++// array literal elements
++[s];
++[N.s];
++[N["s"]];
++// property assignments/methods
++const o2 = {
++    a: s,
++    b: N.s,
++    c: N["s"],
++    method1() { return s; },
++    async method2() { return s; },
++    async *method3() { yield s; },
++    *method4() { yield s; },
++    method5(p = s) { return p; },
++};
++// property initializers
++class C0 {
++    constructor() {
++        this.a = s;
++        this.b = N.s;
++        this.c = N["s"];
++        this.d = s;
++        this.e = N.s;
++        this.f = N["s"];
++    }
++    method1() { return s; }
++    async method2() { return s; }
++    async *method3() { yield s; }
++    *method4() { yield s; }
++    method5(p = s) { return p; }
++}
++C0.a = s;
++C0.b = N.s;
++C0.c = N["s"];
++C0.d = s;
++C0.e = N.s;
++C0.f = N["s"];
++// non-widening positions
++// element access
++o[s];
++o[N.s];
++o[N["s"]];
++// arguments (no-inference)
++f(s);
++f(N.s);
++f(N["s"]);
++g(s);
++g(N.s);
++g(N["s"]);
++// falsy expressions
++s || "";
++N.s || "";
++N["s"] || "";
++// conditionals
++Math.random() * 2 ? s : "a";
++Math.random() * 2 ? N.s : "a";
++Math.random() * 2 ? N["s"] : "a";
++// computed property names
++({
++    [s]: "a",
++    [N.s]: "b",
++});
++class C1 {
++}
++const o3 = {
++    method1() {
++        return s; // return type should not widen due to contextual type
++    },
++    async method2() {
++        return s; // return type should not widen due to contextual type
++    },
++    async *method3() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    *method4() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    method5(p = s) {
++        return p;
++    },
++};
++// allowed when not emitting declarations
++const o4 = {
++    method1(p) {
++        return p;
++    },
++    method2(p) {
++        return p;
++    }
++};
++const ce0 = class {
++    method1(p) {
++        return p;
++    }
++    method2(p) {
++        return p;
++    }
++};
++function funcInferredReturnType(obj) {
++    return obj;
++}
+diff --git a/tests/baselines/reference/uniqueSymbolsDeclarations.mjs b/tests/baselines/reference/uniqueSymbolsDeclarations.mjs
+new file mode 100644
+index 00000000000..728c507c747
+--- /dev/null
++++ b/tests/baselines/reference/uniqueSymbolsDeclarations.mjs
+@@ -0,0 +1,540 @@
++//// [uniqueSymbolsDeclarations.ts]
++// declarations with call initializer
++const constCall = Symbol();
++let letCall = Symbol();
++var varCall = Symbol();
++
++// ambient declaration with type
++declare const constType: unique symbol;
++
++// declaration with type and call initializer
++const constTypeAndCall: unique symbol = Symbol();
++
++// declaration from initializer
++const constInitToConstCall = constCall;
++const constInitToLetCall = letCall;
++const constInitToVarCall = varCall;
++const constInitToConstDeclAmbient = constType;
++let letInitToConstCall = constCall;
++let letInitToLetCall = letCall;
++let letInitToVarCall = varCall;
++let letInitToConstDeclAmbient = constType;
++var varInitToConstCall = constCall;
++var varInitToLetCall = letCall;
++var varInitToVarCall = varCall;
++var varInitToConstDeclAmbient = constType;
++
++// declaration from initializer with type query
++const constInitToConstCallWithTypeQuery: typeof constCall = constCall;
++const constInitToConstDeclAmbientWithTypeQuery: typeof constType = constType;
++
++// function return inference
++function funcReturnConstCall() { return constCall; }
++function funcReturnLetCall() { return letCall; }
++function funcReturnVarCall() { return varCall; }
++
++// function return value with type query
++function funcReturnConstCallWithTypeQuery(): typeof constCall { return constCall; }
++
++// generator function yield inference
++function* genFuncYieldConstCall() { yield constCall; }
++function* genFuncYieldLetCall() { yield letCall; }
++function* genFuncYieldVarCall() { yield varCall; }
++
++// generator function yield with return type query
++function* genFuncYieldConstCallWithTypeQuery(): IterableIterator<typeof constCall> { yield constCall; }
++
++// async function return inference
++async function asyncFuncReturnConstCall() { return constCall; }
++async function asyncFuncReturnLetCall() { return letCall; }
++async function asyncFuncReturnVarCall() { return varCall; }
++
++// async generator function yield inference
++async function* asyncGenFuncYieldConstCall() { yield constCall; }
++async function* asyncGenFuncYieldLetCall() { yield letCall; }
++async function* asyncGenFuncYieldVarCall() { yield varCall; }
++
++// classes
++class C {
++    static readonly readonlyStaticCall = Symbol();
++    static readonly readonlyStaticType: unique symbol;
++    static readonly readonlyStaticTypeAndCall: unique symbol = Symbol();
++    static readwriteStaticCall = Symbol();
++
++    readonly readonlyCall = Symbol();
++    readwriteCall = Symbol();
++}
++declare const c: C;
++
++const constInitToCReadonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCall = C.readwriteStaticCall;
++
++const constInitToCReadonlyStaticCallWithTypeQuery: typeof C.readonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticTypeWithTypeQuery: typeof C.readonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCallWithTypeQuery: typeof C.readonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCallWithTypeQuery: typeof C.readwriteStaticCall = C.readwriteStaticCall;
++
++const constInitToCReadonlyCall = c.readonlyCall;
++const constInitToCReadwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithTypeQuery: typeof c.readonlyCall = c.readonlyCall;
++const constInitToCReadwriteCallWithTypeQuery: typeof c.readwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithIndexedAccess: C["readonlyCall"] = c.readonlyCall;
++const constInitToCReadwriteCallWithIndexedAccess: C["readwriteCall"] = c.readwriteCall;
++
++// interfaces
++interface I {
++    readonly readonlyType: unique symbol;
++}
++declare const i: I;
++
++const constInitToIReadonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithTypeQuery: typeof i.readonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithIndexedAccess: I["readonlyType"] = i.readonlyType;
++
++// type literals
++type L = {
++    readonly readonlyType: unique symbol;
++    nested: {
++        readonly readonlyNestedType: unique symbol;
++    }
++};
++declare const l: L;
++
++const constInitToLReadonlyType = l.readonlyType;
++const constInitToLReadonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithTypeQuery: typeof l.readonlyType = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithTypeQuery: typeof l.nested.readonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithIndexedAccess: L["readonlyType"] = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithIndexedAccess: L["nested"]["readonlyNestedType"] = l.nested.readonlyNestedType;
++
++// type argument inference
++const promiseForConstCall = Promise.resolve(constCall);
++const arrayOfConstCall = [constCall];
++
++// unique symbol widening in expressions
++declare const s: unique symbol;
++declare namespace N { const s: unique symbol; }
++declare const o: { [s]: "a", [N.s]: "b" };
++declare function f<T>(x: T): T;
++declare function g(x: typeof s): void;
++declare function g(x: typeof N.s): void;
++
++// widening positions
++
++// argument inference
++f(s);
++f(N.s);
++f(N["s"]);
++
++// array literal elements
++[s];
++[N.s];
++[N["s"]];
++
++// property assignments/methods
++const o2 = {
++    a: s,
++    b: N.s,
++    c: N["s"],
++
++    method1() { return s; },
++    async method2() { return s; },
++    async * method3() { yield s; },
++    * method4() { yield s; },
++    method5(p = s) { return p; }
++};
++
++// property initializers
++class C0 {
++    static readonly a = s;
++    static readonly b = N.s;
++    static readonly c = N["s"];
++
++    static d = s;
++    static e = N.s;
++    static f = N["s"];
++
++    readonly a = s;
++    readonly b = N.s;
++    readonly c = N["s"];
++
++    d = s;
++    e = N.s;
++    f = N["s"];
++
++    method1() { return s; }
++    async method2() { return s; }
++    async * method3() { yield s; }
++    * method4() { yield s; }
++    method5(p = s) { return p; }
++}
++
++// non-widening positions
++
++// element access
++o[s];
++o[N.s];
++o[N["s"]];
++
++// arguments (no-inference)
++f<typeof s>(s);
++f<typeof N.s>(N.s);
++f<typeof N.s>(N["s"]);
++g(s);
++g(N.s);
++g(N["s"]);
++
++// falsy expressions
++s || "";
++N.s || "";
++N["s"] || "";
++
++// conditionals
++Math.random() * 2 ? s : "a";
++Math.random() * 2 ? N.s : "a";
++Math.random() * 2 ? N["s"] : "a";
++
++// computed property names
++({
++    [s]: "a",
++    [N.s]: "b",
++});
++
++class C1 {
++    static [s]: "a";
++    static [N.s]: "b";
++
++    [s]: "a";
++    [N.s]: "b";
++}
++
++// contextual types
++
++interface Context {
++    method1(): typeof s;
++    method2(): Promise<typeof s>;
++    method3(): AsyncIterableIterator<typeof s>;
++    method4(): IterableIterator<typeof s>;
++    method5(p?: typeof s): typeof s;
++}
++
++const o4: Context = {
++    method1() {
++        return s; // return type should not widen due to contextual type
++    },
++    async method2() {
++        return s; // return type should not widen due to contextual type
++    },
++    async * method3() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    * method4() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    method5(p = s) { // parameter should not widen due to contextual type
++        return p;
++    }
++};
++
++//// [uniqueSymbolsDeclarations.js]
++// declarations with call initializer
++const constCall = Symbol();
++let letCall = Symbol();
++var varCall = Symbol();
++// declaration with type and call initializer
++const constTypeAndCall = Symbol();
++// declaration from initializer
++const constInitToConstCall = constCall;
++const constInitToLetCall = letCall;
++const constInitToVarCall = varCall;
++const constInitToConstDeclAmbient = constType;
++let letInitToConstCall = constCall;
++let letInitToLetCall = letCall;
++let letInitToVarCall = varCall;
++let letInitToConstDeclAmbient = constType;
++var varInitToConstCall = constCall;
++var varInitToLetCall = letCall;
++var varInitToVarCall = varCall;
++var varInitToConstDeclAmbient = constType;
++// declaration from initializer with type query
++const constInitToConstCallWithTypeQuery = constCall;
++const constInitToConstDeclAmbientWithTypeQuery = constType;
++// function return inference
++function funcReturnConstCall() { return constCall; }
++function funcReturnLetCall() { return letCall; }
++function funcReturnVarCall() { return varCall; }
++// function return value with type query
++function funcReturnConstCallWithTypeQuery() { return constCall; }
++// generator function yield inference
++function* genFuncYieldConstCall() { yield constCall; }
++function* genFuncYieldLetCall() { yield letCall; }
++function* genFuncYieldVarCall() { yield varCall; }
++// generator function yield with return type query
++function* genFuncYieldConstCallWithTypeQuery() { yield constCall; }
++// async function return inference
++async function asyncFuncReturnConstCall() { return constCall; }
++async function asyncFuncReturnLetCall() { return letCall; }
++async function asyncFuncReturnVarCall() { return varCall; }
++// async generator function yield inference
++async function* asyncGenFuncYieldConstCall() { yield constCall; }
++async function* asyncGenFuncYieldLetCall() { yield letCall; }
++async function* asyncGenFuncYieldVarCall() { yield varCall; }
++// classes
++class C {
++    constructor() {
++        this.readonlyCall = Symbol();
++        this.readwriteCall = Symbol();
++    }
++}
++C.readonlyStaticCall = Symbol();
++C.readonlyStaticTypeAndCall = Symbol();
++C.readwriteStaticCall = Symbol();
++const constInitToCReadonlyStaticCall = C.readonlyStaticCall;
++const constInitToCReadonlyStaticType = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCall = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCall = C.readwriteStaticCall;
++const constInitToCReadonlyStaticCallWithTypeQuery = C.readonlyStaticCall;
++const constInitToCReadonlyStaticTypeWithTypeQuery = C.readonlyStaticType;
++const constInitToCReadonlyStaticTypeAndCallWithTypeQuery = C.readonlyStaticTypeAndCall;
++const constInitToCReadwriteStaticCallWithTypeQuery = C.readwriteStaticCall;
++const constInitToCReadonlyCall = c.readonlyCall;
++const constInitToCReadwriteCall = c.readwriteCall;
++const constInitToCReadonlyCallWithTypeQuery = c.readonlyCall;
++const constInitToCReadwriteCallWithTypeQuery = c.readwriteCall;
++const constInitToCReadonlyCallWithIndexedAccess = c.readonlyCall;
++const constInitToCReadwriteCallWithIndexedAccess = c.readwriteCall;
++const constInitToIReadonlyType = i.readonlyType;
++const constInitToIReadonlyTypeWithTypeQuery = i.readonlyType;
++const constInitToIReadonlyTypeWithIndexedAccess = i.readonlyType;
++const constInitToLReadonlyType = l.readonlyType;
++const constInitToLReadonlyNestedType = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithTypeQuery = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithTypeQuery = l.nested.readonlyNestedType;
++const constInitToLReadonlyTypeWithIndexedAccess = l.readonlyType;
++const constInitToLReadonlyNestedTypeWithIndexedAccess = l.nested.readonlyNestedType;
++// type argument inference
++const promiseForConstCall = Promise.resolve(constCall);
++const arrayOfConstCall = [constCall];
++// widening positions
++// argument inference
++f(s);
++f(N.s);
++f(N["s"]);
++// array literal elements
++[s];
++[N.s];
++[N["s"]];
++// property assignments/methods
++const o2 = {
++    a: s,
++    b: N.s,
++    c: N["s"],
++    method1() { return s; },
++    async method2() { return s; },
++    async *method3() { yield s; },
++    *method4() { yield s; },
++    method5(p = s) { return p; }
++};
++// property initializers
++class C0 {
++    constructor() {
++        this.a = s;
++        this.b = N.s;
++        this.c = N["s"];
++        this.d = s;
++        this.e = N.s;
++        this.f = N["s"];
++    }
++    method1() { return s; }
++    async method2() { return s; }
++    async *method3() { yield s; }
++    *method4() { yield s; }
++    method5(p = s) { return p; }
++}
++C0.a = s;
++C0.b = N.s;
++C0.c = N["s"];
++C0.d = s;
++C0.e = N.s;
++C0.f = N["s"];
++// non-widening positions
++// element access
++o[s];
++o[N.s];
++o[N["s"]];
++// arguments (no-inference)
++f(s);
++f(N.s);
++f(N["s"]);
++g(s);
++g(N.s);
++g(N["s"]);
++// falsy expressions
++s || "";
++N.s || "";
++N["s"] || "";
++// conditionals
++Math.random() * 2 ? s : "a";
++Math.random() * 2 ? N.s : "a";
++Math.random() * 2 ? N["s"] : "a";
++// computed property names
++({
++    [s]: "a",
++    [N.s]: "b",
++});
++class C1 {
++}
++const o4 = {
++    method1() {
++        return s; // return type should not widen due to contextual type
++    },
++    async method2() {
++        return s; // return type should not widen due to contextual type
++    },
++    async *method3() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    *method4() {
++        yield s; // yield type should not widen due to contextual type
++    },
++    method5(p = s) {
++        return p;
++    }
++};
++
++
++//// [uniqueSymbolsDeclarations.d.ts]
++declare const constCall: unique symbol;
++declare let letCall: symbol;
++declare var varCall: symbol;
++declare const constType: unique symbol;
++declare const constTypeAndCall: unique symbol;
++declare const constInitToConstCall: symbol;
++declare const constInitToLetCall: symbol;
++declare const constInitToVarCall: symbol;
++declare const constInitToConstDeclAmbient: symbol;
++declare let letInitToConstCall: symbol;
++declare let letInitToLetCall: symbol;
++declare let letInitToVarCall: symbol;
++declare let letInitToConstDeclAmbient: symbol;
++declare var varInitToConstCall: symbol;
++declare var varInitToLetCall: symbol;
++declare var varInitToVarCall: symbol;
++declare var varInitToConstDeclAmbient: symbol;
++declare const constInitToConstCallWithTypeQuery: typeof constCall;
++declare const constInitToConstDeclAmbientWithTypeQuery: typeof constType;
++declare function funcReturnConstCall(): symbol;
++declare function funcReturnLetCall(): symbol;
++declare function funcReturnVarCall(): symbol;
++declare function funcReturnConstCallWithTypeQuery(): typeof constCall;
++declare function genFuncYieldConstCall(): IterableIterator<symbol>;
++declare function genFuncYieldLetCall(): IterableIterator<symbol>;
++declare function genFuncYieldVarCall(): IterableIterator<symbol>;
++declare function genFuncYieldConstCallWithTypeQuery(): IterableIterator<typeof constCall>;
++declare function asyncFuncReturnConstCall(): Promise<symbol>;
++declare function asyncFuncReturnLetCall(): Promise<symbol>;
++declare function asyncFuncReturnVarCall(): Promise<symbol>;
++declare function asyncGenFuncYieldConstCall(): AsyncIterableIterator<symbol>;
++declare function asyncGenFuncYieldLetCall(): AsyncIterableIterator<symbol>;
++declare function asyncGenFuncYieldVarCall(): AsyncIterableIterator<symbol>;
++declare class C {
++    static readonly readonlyStaticCall: unique symbol;
++    static readonly readonlyStaticType: unique symbol;
++    static readonly readonlyStaticTypeAndCall: unique symbol;
++    static readwriteStaticCall: symbol;
++    readonly readonlyCall: symbol;
++    readwriteCall: symbol;
++}
++declare const c: C;
++declare const constInitToCReadonlyStaticCall: symbol;
++declare const constInitToCReadonlyStaticType: symbol;
++declare const constInitToCReadonlyStaticTypeAndCall: symbol;
++declare const constInitToCReadwriteStaticCall: symbol;
++declare const constInitToCReadonlyStaticCallWithTypeQuery: typeof C.readonlyStaticCall;
++declare const constInitToCReadonlyStaticTypeWithTypeQuery: typeof C.readonlyStaticType;
++declare const constInitToCReadonlyStaticTypeAndCallWithTypeQuery: typeof C.readonlyStaticTypeAndCall;
++declare const constInitToCReadwriteStaticCallWithTypeQuery: typeof C.readwriteStaticCall;
++declare const constInitToCReadonlyCall: symbol;
++declare const constInitToCReadwriteCall: symbol;
++declare const constInitToCReadonlyCallWithTypeQuery: typeof c.readonlyCall;
++declare const constInitToCReadwriteCallWithTypeQuery: typeof c.readwriteCall;
++declare const constInitToCReadonlyCallWithIndexedAccess: C["readonlyCall"];
++declare const constInitToCReadwriteCallWithIndexedAccess: C["readwriteCall"];
++interface I {
++    readonly readonlyType: unique symbol;
++}
++declare const i: I;
++declare const constInitToIReadonlyType: symbol;
++declare const constInitToIReadonlyTypeWithTypeQuery: typeof i.readonlyType;
++declare const constInitToIReadonlyTypeWithIndexedAccess: I["readonlyType"];
++declare type L = {
++    readonly readonlyType: unique symbol;
++    nested: {
++        readonly readonlyNestedType: unique symbol;
++    };
++};
++declare const l: L;
++declare const constInitToLReadonlyType: symbol;
++declare const constInitToLReadonlyNestedType: symbol;
++declare const constInitToLReadonlyTypeWithTypeQuery: typeof l.readonlyType;
++declare const constInitToLReadonlyNestedTypeWithTypeQuery: typeof l.nested.readonlyNestedType;
++declare const constInitToLReadonlyTypeWithIndexedAccess: L["readonlyType"];
++declare const constInitToLReadonlyNestedTypeWithIndexedAccess: L["nested"]["readonlyNestedType"];
++declare const promiseForConstCall: Promise<typeof constCall>;
++declare const arrayOfConstCall: symbol[];
++declare const s: unique symbol;
++declare namespace N {
++    const s: unique symbol;
++}
++declare const o: {
++    [s]: "a";
++    [N.s]: "b";
++};
++declare function f<T>(x: T): T;
++declare function g(x: typeof s): void;
++declare function g(x: typeof N.s): void;
++declare const o2: {
++    a: symbol;
++    b: symbol;
++    c: symbol;
++    method1(): symbol;
++    method2(): Promise<symbol>;
++    method3(): AsyncIterableIterator<symbol>;
++    method4(): IterableIterator<symbol>;
++    method5(p?: symbol): symbol;
++};
++declare class C0 {
++    static readonly a: symbol;
++    static readonly b: symbol;
++    static readonly c: symbol;
++    static d: symbol;
++    static e: symbol;
++    static f: symbol;
++    readonly a: symbol;
++    readonly b: symbol;
++    readonly c: symbol;
++    d: symbol;
++    e: symbol;
++    f: symbol;
++    method1(): symbol;
++    method2(): Promise<symbol>;
++    method3(): AsyncIterableIterator<symbol>;
++    method4(): IterableIterator<symbol>;
++    method5(p?: symbol): symbol;
++}
++declare class C1 {
++    static [s]: "a";
++    static [N.s]: "b";
++    [s]: "a";
++    [N.s]: "b";
++}
++interface Context {
++    method1(): typeof s;
++    method2(): Promise<typeof s>;
++    method3(): AsyncIterableIterator<typeof s>;
++    method4(): IterableIterator<typeof s>;
++    method5(p?: typeof s): typeof s;
++}
++declare const o4: Context;
+diff --git a/tests/baselines/reference/uniqueSymbolsDeclarationsErrors.mjs b/tests/baselines/reference/uniqueSymbolsDeclarationsErrors.mjs
+new file mode 100644
+index 00000000000..a446a6712a4
+--- /dev/null
++++ b/tests/baselines/reference/uniqueSymbolsDeclarationsErrors.mjs
+@@ -0,0 +1,100 @@
++//// [uniqueSymbolsDeclarationsErrors.ts]
++declare const s: unique symbol;
++interface I { readonly readonlyType: unique symbol; }
++
++// not allowed when emitting declarations
++
++export const obj = {
++    method1(p: typeof s): typeof s {
++        return p;
++    },
++    method2(p: I["readonlyType"]): I["readonlyType"] {
++        return p;
++    }
++};
++
++export const classExpression = class {
++    method1(p: typeof s): typeof s {
++        return p;
++    }
++    method2(p: I["readonlyType"]): I["readonlyType"] {
++        return p;
++    }
++};
++
++export function funcInferredReturnType(obj: { method(p: typeof s): void }) {
++    return obj;
++}
++
++export interface InterfaceWithPrivateNamedProperties {
++    [s]: any;
++}
++
++export interface InterfaceWithPrivateNamedMethods {
++    [s](): any;
++}
++
++export type TypeLiteralWithPrivateNamedProperties = {
++    [s]: any;
++}
++
++export type TypeLiteralWithPrivateNamedMethods = {
++    [s](): any;
++}
++
++export class ClassWithPrivateNamedProperties {
++    [s]: any;
++    static [s]: any;
++}
++
++export class ClassWithPrivateNamedMethods {
++    [s]() {}
++    static [s]() {}
++}
++
++export class ClassWithPrivateNamedAccessors {
++    get [s](): any { return undefined; }
++    set [s](v: any) { }
++    static get [s](): any { return undefined; }
++    static set [s](v: any) { }
++}
++
++//// [uniqueSymbolsDeclarationsErrors.js]
++"use strict";
++Object.defineProperty(exports, "__esModule", { value: true });
++// not allowed when emitting declarations
++exports.obj = {
++    method1(p) {
++        return p;
++    },
++    method2(p) {
++        return p;
++    }
++};
++exports.classExpression = class {
++    method1(p) {
++        return p;
++    }
++    method2(p) {
++        return p;
++    }
++};
++function funcInferredReturnType(obj) {
++    return obj;
++}
++exports.funcInferredReturnType = funcInferredReturnType;
++class ClassWithPrivateNamedProperties {
++}
++exports.ClassWithPrivateNamedProperties = ClassWithPrivateNamedProperties;
++class ClassWithPrivateNamedMethods {
++    [s]() { }
++    static [s]() { }
++}
++exports.ClassWithPrivateNamedMethods = ClassWithPrivateNamedMethods;
++class ClassWithPrivateNamedAccessors {
++    get [s]() { return undefined; }
++    set [s](v) { }
++    static get [s]() { return undefined; }
++    static set [s](v) { }
++}
++exports.ClassWithPrivateNamedAccessors = ClassWithPrivateNamedAccessors;
+diff --git a/tests/baselines/reference/uniqueSymbolsErrors.mjs b/tests/baselines/reference/uniqueSymbolsErrors.mjs
+new file mode 100644
+index 00000000000..ad3c5c20065
+--- /dev/null
++++ b/tests/baselines/reference/uniqueSymbolsErrors.mjs
+@@ -0,0 +1,115 @@
++//// [uniqueSymbolsErrors.ts]
++// declarations
++declare const invalidUniqueType: unique number;
++declare const {}: unique symbol;
++declare let invalidLetType: unique symbol;
++declare var invalidVarType: unique symbol;
++
++// function arguments and return types
++declare function invalidArgType(arg: unique symbol): void;
++declare function invalidRestArgType(...arg: (unique symbol)[]): void;
++declare function invalidReturnType(): unique symbol;
++declare function invalidThisType(this: unique symbol): void;
++declare function invalidTypePredicate(n: any): n is unique symbol;
++declare function invalidTypeParameterConstraint<T extends unique symbol>(): void;
++declare function invalidTypeParameterDefault<T = unique symbol>(): void;
++
++// classes
++class InvalidClass {
++    constructor(invalidConstructorArgType: unique symbol) {}
++
++    readonly invalidReadonlyPropertyType: unique symbol;
++    invalidPropertyType: unique symbol;
++    invalidArgType(arg: unique symbol): void { return; }
++    invalidRestArgType(...args: (unique symbol)[]): void { return; }
++    invalidReturnType(): unique symbol { return; }
++    invalidThisType(this: unique symbol): void { return; }
++    invalidTypePredicate(n: any): n is unique symbol { return; }
++    invalidTypeParameterConstraint<T extends unique symbol>(): void { return; }
++    invalidTypeParameterDefault<T = unique symbol>(): void { return; }
++    get invalidGetter(): unique symbol { return; }
++    set invalidSetter(arg: unique symbol) { return; }
++
++    static invalidStaticPropertyType: unique symbol;
++    static invalidStaticArgType(arg: unique symbol): void { return; }
++    static invalidStaticRestArgType(...args: (unique symbol)[]): void { return; }
++    static invalidStaticReturnType(): unique symbol { return; }
++    static invalidStaticThisType(this: unique symbol): void { return; }
++    static invalidStaticTypePredicate(n: any): n is unique symbol { return; }
++    static invalidStaticTypeParameterConstraint<T extends unique symbol>(): void { return; }
++    static invalidStaticTypeParameterDefault<T = unique symbol>(): void { return; }
++    static get invalidStaticGetter(): unique symbol { return; }
++    static set invalidStaticSetter(arg: unique symbol) { return; }
++}
++
++// interfaces
++interface InvalidInterface {
++    invalidPropertyType: unique symbol;
++    invalidArgType(arg: unique symbol): void;
++    invalidRestArgType(...args: (unique symbol)[]): void;
++    invalidReturnType(): unique symbol;
++    invalidThisType(this: unique symbol);
++    invalidTypePredicate(n: any): n is unique symbol
++    invalidTypeParameterConstraint<T extends unique symbol>(): void;
++    invalidTypeParameterDefault<T = unique symbol>(): void;
++}
++
++// type literals
++type InvalidTypeLiteral = {
++    invalidPropertyType: unique symbol;
++    invalidArgType(arg: unique symbol): void;
++    invalidRestArgType(...args: (unique symbol)[]): void;
++    invalidReturnType(): unique symbol;
++    invalidThisType(this: unique symbol);
++    invalidTypePredicate(n: any): n is unique symbol
++    invalidTypeParameterConstraint<T extends unique symbol>(): void;
++    invalidTypeParameterDefault<T = unique symbol>(): void;
++};
++
++// type alias
++type InvalidAlias = unique symbol;
++type InvalidAliasTypeParameterConstraint<T extends unique symbol> = never;
++type InvalidAliasTypeParameterDefault<T extends unique symbol> = never;
++
++// type references
++declare const invalidTypeArgument: Promise<unique symbol>;
++declare const invalidArrayType: (unique symbol)[];
++declare const invalidTupleType: [unique symbol];
++
++// mapped types
++declare const invalidMappedType: { [P in string]: unique symbol };
++
++// unions/intersection
++declare const invalidUnion: unique symbol | unique symbol;
++declare const invalidIntersection: unique symbol | unique symbol;
++
++// initializer assignability
++// https://github.com/Microsoft/TypeScript/issues/21584
++const shouldNotBeAssignable: string = Symbol();
++
++//// [uniqueSymbolsErrors.js]
++// classes
++class InvalidClass {
++    constructor(invalidConstructorArgType) { }
++    invalidArgType(arg) { return; }
++    invalidRestArgType(...args) { return; }
++    invalidReturnType() { return; }
++    invalidThisType() { return; }
++    invalidTypePredicate(n) { return; }
++    invalidTypeParameterConstraint() { return; }
++    invalidTypeParameterDefault() { return; }
++    get invalidGetter() { return; }
++    set invalidSetter(arg) { return; }
++    static invalidStaticArgType(arg) { return; }
++    static invalidStaticRestArgType(...args) { return; }
++    static invalidStaticReturnType() { return; }
++    static invalidStaticThisType() { return; }
++    static invalidStaticTypePredicate(n) { return; }
++    static invalidStaticTypeParameterConstraint() { return; }
++    static invalidStaticTypeParameterDefault() { return; }
++    static get invalidStaticGetter() { return; }
++    static set invalidStaticSetter(arg) { return; }
++}
++// initializer assignability
++// https://github.com/Microsoft/TypeScript/issues/21584
++const shouldNotBeAssignable = Symbol();

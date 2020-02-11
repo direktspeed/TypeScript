@@ -1,0 +1,547 @@
+From c8d3ee9a90b2f9f17cc7539d222a649921c0590a Mon Sep 17 00:00:00 2001
+From: Saleh <saleh@grasppe.com>
+Date: Wed, 25 Apr 2018 07:37:24 -0400
+Subject: [PATCH] Support for experimental ".mjs" output (src)
+
+---
+ src/compiler/core.ts                          | 44 +++++++++---------
+ src/compiler/emitter.ts                       | 12 +++--
+ src/compiler/moduleNameResolver.ts            |  6 +--
+ src/compiler/program.ts                       |  7 +--
+ src/compiler/resolutionCache.ts               |  2 +-
+ src/compiler/types.ts                         |  1 +
+ src/harness/harness.ts                        | 45 ++++++++++++-------
+ src/harness/projectsRunner.ts                 | 15 +++++--
+ .../unittests/reuseProgramStructure.ts        | 16 +++++--
+ .../unittests/tsserverProjectSystem.ts        |  1 +
+ src/services/codefixes/importFixes.ts         | 10 ++---
+ 11 files changed, 99 insertions(+), 60 deletions(-)
+
+diff --git a/src/compiler/core.ts b/src/compiler/core.ts
+index f0220fb8c93..9f695eaf512 100644
+--- a/src/compiler/core.ts
++++ b/src/compiler/core.ts
+@@ -743,9 +743,9 @@ namespace ts {
+     export function deduplicate<T>(array: ReadonlyArray<T>, equalityComparer: EqualityComparer<T>, comparer?: Comparer<T>): T[] {
+         return !array ? undefined :
+             array.length === 0 ? [] :
+-            array.length === 1 ? array.slice() :
+-            comparer ? deduplicateRelational(array, equalityComparer, comparer) :
+-            deduplicateEquality(array, equalityComparer);
++                array.length === 1 ? array.slice() :
++                    comparer ? deduplicateRelational(array, equalityComparer, comparer) :
++                        deduplicateEquality(array, equalityComparer);
+     }
+ 
+     /**
+@@ -1008,15 +1008,17 @@ namespace ts {
+ 
+     export function arrayIterator<T>(array: ReadonlyArray<T>): Iterator<T> {
+         let i = 0;
+-        return { next: () => {
+-            if (i === array.length) {
+-                return { value: undefined as never, done: true };
+-            }
+-            else {
+-                i++;
+-                return { value: array[i - 1], done: false };
++        return {
++            next: () => {
++                if (i === array.length) {
++                    return { value: undefined as never, done: true };
++                }
++                else {
++                    i++;
++                    return { value: array[i - 1], done: false };
++                }
+             }
+-        }};
++        };
+     }
+ 
+     /**
+@@ -1710,9 +1712,9 @@ namespace ts {
+     function compareComparableValues(a: string | number, b: string | number) {
+         return a === b ? Comparison.EqualTo :
+             a === undefined ? Comparison.LessThan :
+-            b === undefined ? Comparison.GreaterThan :
+-            a < b ? Comparison.LessThan :
+-            Comparison.GreaterThan;
++                b === undefined ? Comparison.GreaterThan :
++                    a < b ? Comparison.LessThan :
++                        Comparison.GreaterThan;
+     }
+ 
+     /**
+@@ -1882,8 +1884,8 @@ namespace ts {
+     export function compareProperties<T, K extends keyof T>(a: T, b: T, key: K, comparer: Comparer<T[K]>) {
+         return a === b ? Comparison.EqualTo :
+             a === undefined ? Comparison.LessThan :
+-            b === undefined ? Comparison.GreaterThan :
+-            comparer(a[key], b[key]);
++                b === undefined ? Comparison.GreaterThan :
++                    comparer(a[key], b[key]);
+     }
+ 
+     function getDiagnosticFileName(diagnostic: Diagnostic): string {
+@@ -2036,7 +2038,7 @@ namespace ts {
+         return compilerOptions.target || ScriptTarget.ES3;
+     }
+ 
+-    export function getEmitModuleKind(compilerOptions: {module?: CompilerOptions["module"], target?: CompilerOptions["target"]}) {
++    export function getEmitModuleKind(compilerOptions: { module?: CompilerOptions["module"], target?: CompilerOptions["target"] }) {
+         return typeof compilerOptions.module === "number" ?
+             compilerOptions.module :
+             getEmitScriptTarget(compilerOptions) >= ScriptTarget.ES2015 ? ModuleKind.ES2015 : ModuleKind.CommonJS;
+@@ -2653,6 +2655,8 @@ namespace ts {
+     export function getScriptKindFromFileName(fileName: string): ScriptKind {
+         const ext = fileName.substr(fileName.lastIndexOf("."));
+         switch (ext.toLowerCase()) {
++            case Extension.Mjs:
++                return ScriptKind.JS;
+             case Extension.Js:
+                 return ScriptKind.JS;
+             case Extension.Jsx:
+@@ -2674,7 +2678,7 @@ namespace ts {
+     export const supportedTypeScriptExtensions: ReadonlyArray<Extension> = [Extension.Ts, Extension.Tsx, Extension.Dts];
+     /** Must have ".d.ts" first because if ".ts" goes first, that will be detected as the extension instead of ".d.ts". */
+     export const supportedTypescriptExtensionsForExtractExtension: ReadonlyArray<Extension> = [Extension.Dts, Extension.Ts, Extension.Tsx];
+-    export const supportedJavascriptExtensions: ReadonlyArray<Extension> = [Extension.Js, Extension.Jsx];
++    export const supportedJavascriptExtensions: ReadonlyArray<Extension> = [Extension.Mjs, Extension.Js, Extension.Jsx];
+     const allSupportedExtensions: ReadonlyArray<Extension> = [...supportedTypeScriptExtensions, ...supportedJavascriptExtensions];
+ 
+     export function getSupportedExtensions(options?: CompilerOptions, extraFileExtensions?: ReadonlyArray<JsFileExtensionInfo>): ReadonlyArray<string> {
+@@ -2760,7 +2764,7 @@ namespace ts {
+         }
+     }
+ 
+-    const extensionsToRemove = [Extension.Dts, Extension.Ts, Extension.Js, Extension.Tsx, Extension.Jsx];
++    const extensionsToRemove = [Extension.Dts, Extension.Ts, Extension.Mjs, Extension.Js, Extension.Tsx, Extension.Jsx];
+     export function removeFileExtension(path: string): string {
+         for (const ext of extensionsToRemove) {
+             const extensionless = tryRemoveExtension(path, ext);
+@@ -2822,7 +2826,7 @@ namespace ts {
+         }
+     }
+ 
+-    function Signature() {} // tslint:disable-line no-empty
++    function Signature() { } // tslint:disable-line no-empty
+ 
+     function Node(this: Node, kind: SyntaxKind, pos: number, end: number) {
+         this.pos = pos;
+diff --git a/src/compiler/emitter.ts b/src/compiler/emitter.ts
+index 2b01f2fdda1..bdb148542d0 100644
+--- a/src/compiler/emitter.ts
++++ b/src/compiler/emitter.ts
+@@ -77,7 +77,11 @@ namespace ts {
+                 return Extension.Jsx;
+             }
+         }
+-        return Extension.Js;
++        return options.target === ScriptTarget.ESNext
++            && options.module === ModuleKind.ESNext
++            && options.esModuleInterop
++            && options.allowSyntheticDefaultImports
++            && Extension.Mjs || Extension.Js;
+     }
+ 
+     /*@internal*/
+@@ -3236,10 +3240,10 @@ namespace ts {
+                     pushNameGenerationScope(/*node*/ undefined);
+                     tempFlags = savedTempFlags;
+                     return result;
+-                  }
+-                  else {
++                }
++                else {
+                     return generateNameCached(getNodeForGeneratedName(name));
+-                  }
++                }
+             }
+             else {
+                 // Auto, Loop, and Unique names are cached based on their unique
+diff --git a/src/compiler/moduleNameResolver.ts b/src/compiler/moduleNameResolver.ts
+index 81aed522490..c9fb3b8bf63 100644
+--- a/src/compiler/moduleNameResolver.ts
++++ b/src/compiler/moduleNameResolver.ts
+@@ -932,7 +932,7 @@ namespace ts {
+             case Extensions.TypeScript:
+                 return tryExtension(Extension.Ts) || tryExtension(Extension.Tsx) || tryExtension(Extension.Dts);
+             case Extensions.JavaScript:
+-                return tryExtension(Extension.Js) || tryExtension(Extension.Jsx);
++                return tryExtension(Extension.Mjs) || tryExtension(Extension.Js) || tryExtension(Extension.Jsx);
+         }
+ 
+         function tryExtension(ext: Extension): PathAndExtension | undefined {
+@@ -996,7 +996,7 @@ namespace ts {
+                 else {
+                     const jsPath = tryReadPackageJsonFields(/*readTypes*/ false, packageJsonContent, nodeModuleDirectory, state);
+                     if (typeof jsPath === "string") {
+-                        subModuleName = removeExtension(removeExtension(jsPath.substring(nodeModuleDirectory.length + 1), Extension.Js), Extension.Jsx) + Extension.Dts;
++                        subModuleName = removeExtension(removeExtension(removeExtension(jsPath.substring(nodeModuleDirectory.length + 1), Extension.Mjs), Extension.Js), Extension.Jsx) + Extension.Dts;
+                     }
+                     else {
+                         subModuleName = "index.d.ts";
+@@ -1068,7 +1068,7 @@ namespace ts {
+     function extensionIsOk(extensions: Extensions, extension: Extension): boolean {
+         switch (extensions) {
+             case Extensions.JavaScript:
+-                return extension === Extension.Js || extension === Extension.Jsx;
++                return extension === Extension.Mjs || extension === Extension.Js || extension === Extension.Jsx;
+             case Extensions.TypeScript:
+                 return extension === Extension.Ts || extension === Extension.Tsx || extension === Extension.Dts;
+             case Extensions.DtsOnly:
+diff --git a/src/compiler/program.ts b/src/compiler/program.ts
+index 75cdd07845f..11d4a6f39f7 100755
+--- a/src/compiler/program.ts
++++ b/src/compiler/program.ts
+@@ -328,14 +328,14 @@ namespace ts {
+ 
+                 output += formatColorAndReset(relativeFileName, ForegroundColorEscapeSequences.Cyan);
+                 output += ":";
+-                output += formatColorAndReset(`${ firstLine + 1 }`, ForegroundColorEscapeSequences.Yellow);
++                output += formatColorAndReset(`${firstLine + 1}`, ForegroundColorEscapeSequences.Yellow);
+                 output += ":";
+-                output += formatColorAndReset(`${ firstLineChar + 1 }`, ForegroundColorEscapeSequences.Yellow);
++                output += formatColorAndReset(`${firstLineChar + 1}`, ForegroundColorEscapeSequences.Yellow);
+                 output += " - ";
+             }
+ 
+             output += formatColorAndReset(diagnosticCategoryName(diagnostic), getCategoryFormat(diagnostic.category));
+-            output += formatColorAndReset(` TS${ diagnostic.code }: `, ForegroundColorEscapeSequences.Grey);
++            output += formatColorAndReset(` TS${diagnostic.code}: `, ForegroundColorEscapeSequences.Grey);
+             output += flattenDiagnosticMessageText(diagnostic.messageText, host.getNewLine());
+ 
+             if (diagnostic.file) {
+@@ -2428,6 +2428,7 @@ namespace ts {
+                 return needJsx();
+             case Extension.Jsx:
+                 return needJsx() || needAllowJs();
++            case Extension.Mjs:
+             case Extension.Js:
+                 return needAllowJs();
+         }
+diff --git a/src/compiler/resolutionCache.ts b/src/compiler/resolutionCache.ts
+index 35e056546c0..cfb43a8defa 100644
+--- a/src/compiler/resolutionCache.ts
++++ b/src/compiler/resolutionCache.ts
+@@ -103,7 +103,7 @@ namespace ts {
+          * This helps in not having to comb through all resolutions when files are added/removed
+          * Note that .d.ts file also has .d.ts extension hence will be part of default extensions
+          */
+-        const failedLookupDefaultExtensions = [Extension.Ts, Extension.Tsx, Extension.Js, Extension.Jsx, Extension.Json];
++        const failedLookupDefaultExtensions = [Extension.Ts, Extension.Tsx, Extension.Mjs, Extension.Js, Extension.Jsx, Extension.Json];
+         const customFailedLookupPaths = createMap<number>();
+ 
+         const directoryWatchesOfFailedLookups = createMap<DirectoryWatchesOfFailedLookup>();
+diff --git a/src/compiler/types.ts b/src/compiler/types.ts
+index 06f15e1d77a..f96a8e02ee4 100644
+--- a/src/compiler/types.ts
++++ b/src/compiler/types.ts
+@@ -4583,6 +4583,7 @@ namespace ts {
+         Ts = ".ts",
+         Tsx = ".tsx",
+         Dts = ".d.ts",
++        Mjs = ".mjs",
+         Js = ".js",
+         Jsx = ".jsx",
+         Json = ".json"
+diff --git a/src/harness/harness.ts b/src/harness/harness.ts
+index 9e6978f2a15..85650a0f096 100644
+--- a/src/harness/harness.ts
++++ b/src/harness/harness.ts
+@@ -159,7 +159,7 @@ namespace Utils {
+     export function memoize<T extends ts.AnyFunction>(f: T, memoKey: (...anything: any[]) => string): T {
+         const cache = ts.createMap<any>();
+ 
+-        return <any>(function(this: any, ...args: any[]) {
++        return <any>(function (this: any, ...args: any[]) {
+             const key = memoKey(...args);
+             if (cache.has(key)) {
+                 return cache.get(key);
+@@ -1343,7 +1343,7 @@ namespace Harness {
+         export function getErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean) {
+             let outputLines = "";
+             const gen = iterateErrorBaseline(inputFiles, diagnostics, pretty);
+-            for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++            for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                 const [, content] = value;
+                 outputLines += content;
+             }
+@@ -1352,7 +1352,7 @@ namespace Harness {
+ 
+         export const diagnosticSummaryMarker = "__diagnosticSummary";
+         export const globalErrorsMarker = "__globalErrors";
+-        export function *iterateErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean): IterableIterator<[string, string, number]> {
++        export function* iterateErrorBaseline(inputFiles: ReadonlyArray<TestFile>, diagnostics: ReadonlyArray<ts.Diagnostic>, pretty?: boolean): IterableIterator<[string, string, number]> {
+             diagnostics = ts.sort(diagnostics, ts.compareDiagnostics);
+             let outputLines = "";
+             // Count up all errors that were found in files other than lib.d.ts so we don't miss any
+@@ -1496,7 +1496,7 @@ namespace Harness {
+             });
+         }
+ 
+-        export function doTypeAndSymbolBaseline(baselinePath: string, program: ts.Program, allFiles: {unitName: string, content: string}[], opts?: Baseline.BaselineOptions, multifile?: boolean, skipTypeBaselines?: boolean, skipSymbolBaselines?: boolean) {
++        export function doTypeAndSymbolBaseline(baselinePath: string, program: ts.Program, allFiles: { unitName: string, content: string }[], opts?: Baseline.BaselineOptions, multifile?: boolean, skipTypeBaselines?: boolean, skipSymbolBaselines?: boolean) {
+             // The full walker simulates the types that you would get from doing a full
+             // compile.  The pull walker simulates the types you get when you just do
+             // a type query for a random node (like how the LS would do it).  Most of the
+@@ -1567,7 +1567,7 @@ namespace Harness {
+             function generateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): string {
+                 let result = "";
+                 const gen = iterateBaseLine(isSymbolBaseline, skipBaseline);
+-                for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++                for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                     const [, content] = value;
+                     result += content;
+                 }
+@@ -1576,7 +1576,7 @@ namespace Harness {
+                 /* tslint:enable:no-null-keyword */
+             }
+ 
+-            function *iterateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): IterableIterator<[string, string]> {
++            function* iterateBaseLine(isSymbolBaseline: boolean, skipBaseline?: boolean): IterableIterator<[string, string]> {
+                 if (skipBaseline) {
+                     return;
+                 }
+@@ -1588,7 +1588,7 @@ namespace Harness {
+                     const codeLines = ts.flatMap(file.content.split(/\r?\n/g), e => e.split(/[\r\u2028\u2029]/g));
+                     const gen: IterableIterator<TypeWriterResult> = isSymbolBaseline ? fullWalker.getSymbols(unitName) : fullWalker.getTypes(unitName);
+                     let lastIndexWritten: number | undefined;
+-                    for (let {done, value: result} = gen.next(); !done; { done, value: result } = gen.next()) {
++                    for (let { done, value: result } = gen.next(); !done; { done, value: result } = gen.next()) {
+                         if (isSymbolBaseline && !result.symbol) {
+                             return;
+                         }
+@@ -1644,7 +1644,14 @@ namespace Harness {
+                     throw new Error("Number of sourcemap files should be same as js files.");
+                 }
+ 
+-                Baseline.runBaseline(baselinePath.replace(/\.tsx?/, ".js.map"), () => {
++                const outExt = options.target === ts.ScriptTarget.ESNext
++                    && options.module === ts.ModuleKind.ESNext
++                    && options.esModuleInterop
++                    && options.allowSyntheticDefaultImports
++                    ? ts.Extension.Mjs : ts.Extension.Js;
++                const mapExt = `${outExt}.map`;
++
++                Baseline.runBaseline(baselinePath.replace(/\.tsx?/, mapExt), () => {
+                     if ((options.noEmitOnError && result.errors.length !== 0) || result.sourceMaps.length === 0) {
+                         // We need to return null here or the runBaseLine will actually create a empty file.
+                         // Baselining isn't required here because there is no output.
+@@ -1668,8 +1675,11 @@ namespace Harness {
+                 throw new Error("Expected at least one js file to be emitted or at least one error to be created.");
+             }
+ 
++            const outExt = options.target === ts.ScriptTarget.ESNext
++                ? ts.Extension.Mjs : ts.Extension.Js;
++
+             // check js output
+-            Baseline.runBaseline(baselinePath.replace(/\.tsx?/, ts.Extension.Js), () => {
++            Baseline.runBaseline(baselinePath.replace(/\.tsx?/, outExt), () => {
+                 let tsCode = "";
+                 const tsSources = otherFiles.concat(toBeCompiled);
+                 if (tsSources.length > 1) {
+@@ -1723,7 +1733,7 @@ namespace Harness {
+             const gen = iterateOutputs(outputFiles);
+             // Emit them
+             let result = "";
+-            for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++            for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                 // Some extra spacing if this isn't the first file
+                 if (result.length) {
+                     result += "\r\n\r\n";
+@@ -1735,7 +1745,7 @@ namespace Harness {
+             return result;
+         }
+ 
+-        export function *iterateOutputs(outputFiles: GeneratedFile[]): IterableIterator<[string, string]> {
++        export function* iterateOutputs(outputFiles: GeneratedFile[]): IterableIterator<[string, string]> {
+             // Collect, test, and sort the fileNames
+             outputFiles.sort((a, b) => ts.compareStringsCaseSensitive(cleanName(a.fileName), cleanName(b.fileName)));
+             const dupeCase = ts.createMap<number>();
+@@ -1797,14 +1807,17 @@ namespace Harness {
+         }
+ 
+         export function isJS(fileName: string) {
+-            return ts.endsWith(fileName, ts.Extension.Js);
++            return ts.endsWith(fileName, ts.Extension.Mjs)
++                || ts.endsWith(fileName, ts.Extension.Js);
+         }
+         export function isJSX(fileName: string) {
+             return ts.endsWith(fileName, ts.Extension.Jsx);
+         }
+ 
+         export function isJSMap(fileName: string) {
+-            return ts.endsWith(fileName, ".js.map") || ts.endsWith(fileName, ".jsx.map");
++            return ts.endsWith(fileName, ".mjs.map")
++                || ts.endsWith(fileName, ".js.map")
++                || ts.endsWith(fileName, ".jsx.map");
+         }
+ 
+         export function isDTSMap(fileName: string) {
+@@ -1874,7 +1887,7 @@ namespace Harness {
+             let match: RegExpExecArray;
+             /* tslint:disable:no-null-keyword */
+             while ((match = optionRegex.exec(content)) !== null) {
+-            /* tslint:enable:no-null-keyword */
++                /* tslint:enable:no-null-keyword */
+                 opts[match[1]] = match[2].trim();
+             }
+ 
+@@ -2056,7 +2069,7 @@ namespace Harness {
+ 
+             /* tslint:disable:no-null-keyword */
+             if (actual === null) {
+-            /* tslint:enable:no-null-keyword */
++                /* tslint:enable:no-null-keyword */
+                 actual = noContent;
+             }
+ 
+@@ -2119,7 +2132,7 @@ namespace Harness {
+             const errors: Error[] = [];
+             // tslint:disable-next-line:no-null-keyword
+             if (gen !== null) {
+-                for (let {done, value} = gen.next(); !done; { done, value } = gen.next()) {
++                for (let { done, value } = gen.next(); !done; { done, value } = gen.next()) {
+                     const [name, content, count] = value as [string, string, number | undefined];
+                     if (count === 0) continue; // Allow error reporter to skip writing files without errors
+                     const relativeFileName = relativeFileBase + "/" + name + extension;
+diff --git a/src/harness/projectsRunner.ts b/src/harness/projectsRunner.ts
+index 7dbfe0c5a75..a187773f768 100644
+--- a/src/harness/projectsRunner.ts
++++ b/src/harness/projectsRunner.ts
+@@ -81,8 +81,8 @@ class ProjectRunner extends RunnerBase {
+             return moduleKind === ts.ModuleKind.AMD
+                 ? "amd"
+                 : moduleKind === ts.ModuleKind.CommonJS
+-                ? "node"
+-                : "none";
++                    ? "node"
++                    : "none";
+         }
+ 
+         // Project baselines verified go in project/testCaseName/moduleKind/
+@@ -312,6 +312,13 @@ class ProjectRunner extends RunnerBase {
+                     : Harness.IO.resolvePath(ts.normalizeSlashes(testCase.projectRoot) + "/" + ts.normalizeSlashes(fileName));
+ 
+                 const currentDirectory = getCurrentDirectory();
++                const outExt = compilerOptions.target === ts.ScriptTarget.ESNext
++                    && compilerOptions.module === ts.ModuleKind.ESNext
++                    && compilerOptions.esModuleInterop
++                    && compilerOptions.allowSyntheticDefaultImports
++                    ? ts.Extension.Mjs : ts.Extension.Js;
++                const mapExt = `${outExt}.map`;
++
+                 // compute file name relative to current directory (expanded project root)
+                 let diskRelativeName = ts.getRelativePathToDirectoryOrUrl(currentDirectory, diskFileName, currentDirectory, Harness.Compiler.getCanonicalFileName, /*isAbsolutePathAnUrl*/ false);
+                 if (ts.isRootedDiskPath(diskRelativeName) || diskRelativeName.substr(0, 3) === "../") {
+@@ -319,8 +326,8 @@ class ProjectRunner extends RunnerBase {
+                     // we need to instead create files that can live in the project reference folder
+                     // but make sure extension of these files matches with the fileName the compiler asked to write
+                     diskRelativeName = "diskFile" + nonSubfolderDiskFiles +
+-                    (Harness.Compiler.isDTS(fileName) ? ts.Extension.Dts :
+-                    Harness.Compiler.isJS(fileName) ? ts.Extension.Js : ".js.map");
++                        (Harness.Compiler.isDTS(fileName) ? ts.Extension.Dts :
++                            Harness.Compiler.isJS(fileName) ? outExt : mapExt);
+                     nonSubfolderDiskFiles++;
+                 }
+ 
+diff --git a/src/harness/unittests/reuseProgramStructure.ts b/src/harness/unittests/reuseProgramStructure.ts
+index 0ba9e6f6351..f1bf238575d 100644
+--- a/src/harness/unittests/reuseProgramStructure.ts
++++ b/src/harness/unittests/reuseProgramStructure.ts
+@@ -467,8 +467,10 @@ namespace ts {
+                         "File 'node_modules/@types/a/index.d.ts' does not exist.",
+                         "Loading module 'a' from 'node_modules' folder, target file type 'JavaScript'.",
+                         "File 'node_modules/a/package.json' does not exist.",
++                        "File 'node_modules/a.mjs' does not exist.",
+                         "File 'node_modules/a.js' does not exist.",
+                         "File 'node_modules/a.jsx' does not exist.",
++                        "File 'node_modules/a/index.mjs' does not exist.",
+                         "File 'node_modules/a/index.js' does not exist.",
+                         "File 'node_modules/a/index.jsx' does not exist.",
+                         "======== Module name 'a' was not resolved. ========"
+@@ -533,10 +535,13 @@ namespace ts {
+                     "File '/node_modules/@types/fs/package.json' does not exist.",
+                     "File '/node_modules/@types/fs.d.ts' does not exist.",
+                     "File '/node_modules/@types/fs/index.d.ts' does not exist.",
++                    "File '/a/b/fs.mjs' does not exist.",
+                     "File '/a/b/fs.js' does not exist.",
+                     "File '/a/b/fs.jsx' does not exist.",
++                    "File '/a/fs.mjs' does not exist.",
+                     "File '/a/fs.js' does not exist.",
+                     "File '/a/fs.jsx' does not exist.",
++                    "File '/fs.mjs' does not exist.",
+                     "File '/fs.js' does not exist.",
+                     "File '/fs.jsx' does not exist.",
+                     "======== Module name 'fs' was not resolved. ========",
+@@ -575,10 +580,13 @@ namespace ts {
+                     "File '/node_modules/@types/fs/package.json' does not exist.",
+                     "File '/node_modules/@types/fs.d.ts' does not exist.",
+                     "File '/node_modules/@types/fs/index.d.ts' does not exist.",
++                    "File '/a/b/fs.mjs' does not exist.",
+                     "File '/a/b/fs.js' does not exist.",
+                     "File '/a/b/fs.jsx' does not exist.",
++                    "File '/a/fs.mjs' does not exist.",
+                     "File '/a/fs.js' does not exist.",
+                     "File '/a/fs.jsx' does not exist.",
++                    "File '/fs.mjs' does not exist.",
+                     "File '/fs.js' does not exist.",
+                     "File '/fs.jsx' does not exist.",
+                     "======== Module name 'fs' was not resolved. ========",
+@@ -596,10 +604,10 @@ namespace ts {
+                 {
+                     name: "f1.ts",
+                     text:
+-                    SourceText.New(
+-                        `/// <reference path="a1.ts"/>${newLine}/// <reference types="typerefs1"/>${newLine}/// <reference no-default-lib="true"/>`,
+-                        `import { B } from './b1';${newLine}export let BB = B;`,
+-                        "declare module './b1' { interface B { y: string; } }")
++                        SourceText.New(
++                            `/// <reference path="a1.ts"/>${newLine}/// <reference types="typerefs1"/>${newLine}/// <reference no-default-lib="true"/>`,
++                            `import { B } from './b1';${newLine}export let BB = B;`,
++                            "declare module './b1' { interface B { y: string; } }")
+                 },
+                 {
+                     name: "f2.ts",
+diff --git a/src/harness/unittests/tsserverProjectSystem.ts b/src/harness/unittests/tsserverProjectSystem.ts
+index 1c0dd0beb5c..5b4743693ab 100644
+--- a/src/harness/unittests/tsserverProjectSystem.ts
++++ b/src/harness/unittests/tsserverProjectSystem.ts
+@@ -6115,6 +6115,7 @@ namespace ts.projectSystem {
+                 });
+                 forEachAncestorDirectory(getDirectoryPath(root.path), ancestor => {
+                     locations.push(
++                        combinePaths(ancestor, `${module}.mjs`),
+                         combinePaths(ancestor, `${module}.js`),
+                         combinePaths(ancestor, `${module}.jsx`)
+                     );
+diff --git a/src/services/codefixes/importFixes.ts b/src/services/codefixes/importFixes.ts
+index 26fa45d1e53..8d599247ced 100644
+--- a/src/services/codefixes/importFixes.ts
++++ b/src/services/codefixes/importFixes.ts
+@@ -213,7 +213,7 @@ namespace ts.codefix {
+     }
+ 
+     function usesJsExtensionOnImports(sourceFile: SourceFile): boolean {
+-        return firstDefined(sourceFile.imports, ({ text }) => pathIsRelative(text) ? fileExtensionIs(text, Extension.Js) : undefined) || false;
++        return firstDefined(sourceFile.imports, ({ text }) => pathIsRelative(text) ? fileExtensionIsOneOf(text, [Extension.Mjs, Extension.Js]) : undefined) || false;
+     }
+ 
+     function createImportClauseOfKind(kind: ImportKind.Default | ImportKind.Named | ImportKind.Namespace, symbolName: string) {
+@@ -729,10 +729,10 @@ namespace ts.codefix {
+             if (defaultExport) {
+                 const localSymbol = getLocalSymbolForExportDefault(defaultExport);
+                 if ((
+-                        localSymbol && localSymbol.escapedName === symbolName ||
+-                        getEscapedNameForExportDefault(defaultExport) === symbolName ||
+-                        moduleSymbolToValidIdentifier(moduleSymbol, program.getCompilerOptions().target) === symbolName
+-                    ) && checkSymbolHasMeaning(localSymbol || defaultExport, currentTokenMeaning)) {
++                    localSymbol && localSymbol.escapedName === symbolName ||
++                    getEscapedNameForExportDefault(defaultExport) === symbolName ||
++                    moduleSymbolToValidIdentifier(moduleSymbol, program.getCompilerOptions().target) === symbolName
++                ) && checkSymbolHasMeaning(localSymbol || defaultExport, currentTokenMeaning)) {
+                     addSymbol(moduleSymbol, localSymbol || defaultExport, ImportKind.Default);
+                 }
+             }
