@@ -1,3 +1,21 @@
+# Fork Related Updates
+1. .mjs files get emited as .js files 
+2. It allows TypeScript to resolve bare specifiers for a file when a respective ".mjs" file can be found, by first looking for a ".mjs" immediately before looking for a ".js" (without affecting any other order).
+
+3. It allows TypeScript to output to ".mjs" only under the following very restrictive config:
+
+{
+  "compilerOptions": {
+    "module": "esnext",
+    "target": "esnext",
+    "allowSyntheticDefaultImports": true,
+    "esModuleInterop": true
+  }
+}
+
+
+
+
 
 # TypeScript
 
