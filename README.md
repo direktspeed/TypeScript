@@ -14,8 +14,20 @@
 }
 
 
-
-
+## Usage with vscode
+VS Code ships with a recent stable version of TypeScript. If you want to use a newer version of TypeScript, you can define the typescript.tsdk setting (File > Preferences > User/Workspace Settings) pointing to a directory containing the TypeScript tsserver.js file.
+...
+For example:
+.vscode/
+```json
+{
+   "typescript.tsdk": "node_modules/typescript/lib"
+}
+```
+a other good way is to copy this lib to ~/.typescript for internal reuse.
+```bash
+git clone --depth 1 https://github.com/direktspeed/typescript ~/.typescript 
+```
 
 # TypeScript
 
