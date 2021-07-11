@@ -3000,7 +3000,9 @@ declare namespace ts {
          * Used on extensions that doesn't define the ScriptKind but the content defines it.
          * Deferred extensions are going to be included in all project contexts.
          */
-        Deferred = 7
+        Deferred = 7,
+        MJS = 8,
+        CJS = 9,
     }
     export enum ScriptTarget {
         ES3 = 0,
